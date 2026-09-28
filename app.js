@@ -2,7 +2,7 @@
    Содержимое — content.json (собирает build.py), прогресс — память телефона + закрытое хранилище GitHub. */
 (function(){
 "use strict";
-const VERSION = "b7f569a23d";
+const VERSION = "0b2e5058cb";
 
 /* ---------- утилиты ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -1049,6 +1049,8 @@ function renderMe(){
 /* ---------- синхронизация с закрытым хранилищем GitHub ---------- */
 const SYNC_LS = "zh-sync";
 const DEFAULT_REPO = "unclenesh23-debug/chinese-progress";
+// страница GitHub с уже заполненным ключом: имя, срок, право «Contents: запись»; хранилище хозяин выбирает сам
+const TOKEN_URL = "https://github.com/settings/personal-access-tokens/new?name=chinese-phone&description=" + encodeURIComponent("Приложение «Китайский»: прогресс для Claude") + "&target_name=unclenesh23-debug&expires_in=366&contents=write";
 function b64enc(str){ const bytes = new TextEncoder().encode(str); let bin = ""; for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)); return btoa(bin); }
 function b64dec(b64){ const bin = atob(String(b64).replace(/\s/g, "")); const bytes = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i); return new TextDecoder().decode(bytes); }
 const Sync = {
@@ -1104,13 +1106,15 @@ const Sync = {
 };
 window.addEventListener("online", () => Sync.flushSoon());
 function syncCardHTML(c){
-  if (!c) return `<p class="small">Подключи закрытое хранилище — Claude будет видеть уроки, ошибки и серию и писать тебе план. Один раз, 3 минуты. Ключ Claude объяснит в чате, как получить.</p>
-    <input class="field" id="tok" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Ключ доступа (github_pat_…)">
+  if (!c) return `<p class="small">Подключи закрытое хранилище — Claude будет видеть уроки, ошибки и серию и писать тебе план. Один раз, 3 минуты.</p>
+    <a class="btn block" href="${TOKEN_URL}" target="_blank" rel="noopener">1. Создать ключ на GitHub</a>
+    <p class="small muted">Там выбери хранилище <b>chinese-progress</b>, проверь «Contents — Read and write», нажми «Generate token» и скопируй ключ.</p>
+    <input class="field" id="tok" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="2. Вставь ключ (github_pat_…)">
     <input class="field" id="repo" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(DEFAULT_REPO)}" aria-label="Хранилище">
-    <button class="btn primary block" id="conn">Подключить</button>`;
+    <button class="btn primary block" id="conn">3. Подключить</button>`;
   const t = Sync.lastTime();
   return `<div class="${Sync.err ? "no-line" : "ok-line"}">${Sync.err ? "✗ " + esc(Sync.err) : "✓ Подключено"}</div>
-    <p class="small muted">${t ? "Отправлено: " + (dayKey(t) === dayKey() ? "сегодня" : dayKey(t)) + " в " + hhmm(t) : "Ещё не отправлялось"} · ${esc(c.repo)}</p>
+    <p class="small muted">${Sync.busy ? "Связываюсь с хранилищем…" : t ? "Отправлено: " + (dayKey(t) === dayKey() ? "сегодня" : dayKey(t)) + " в " + hhmm(t) : "Ещё не отправлялось"} · ${esc(c.repo)}</p>
     <div class="row"><button class="btn grow" id="pushNow">Отправить сейчас</button><button class="btn ghost" id="disc">Отключить</button></div>`;
 }
 function bindSyncCard(){
