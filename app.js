@@ -2,7 +2,7 @@
    Содержимое — content.json (собирает build.py), прогресс — память телефона + закрытое хранилище GitHub. */
 (function(){
 "use strict";
-const VERSION = "0b2e5058cb";
+const VERSION = "af2059286c";
 
 /* ---------- утилиты ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -38,13 +38,15 @@ const I = {
   speak:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>',
   coin:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9 8l3 4 3-4M12 12v5M9 13h6M9 15.5h6"/></svg>',
   pairs:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 9h3l3 6h2M13 9h3l3 6h3"/></svg>',
+  similar:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="9" cy="12" r="5.5"/><circle cx="15" cy="12" r="5.5"/></svg>',
   share:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7.5 7.5 12 3l4.5 4.5M6 11H5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-8a1 1 0 0 0-1-1h-1"/></svg>'
 };
 const stroke = s => s.replace("<svg ", '<svg fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" ');
 
 /* ---------- пиньинь и тоны ---------- */
 const V = "aeiouüvāáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜ";
-const SYL = new RegExp("(?:zh|ch|sh|[bpmfdtnlgkhjqxrzcsyw])?[" + V + "]+(?:ng(?![" + V + "])|n(?![" + V + "])|r(?![" + V + "]))?", "gi");
+// слог пиньиня; «儿» после n/ng (yìdiǎnr, yàngr) — часть слога
+const SYL = new RegExp("(?:zh|ch|sh|[bpmfdtnlgkhjqxrzcsyw])?[" + V + "]+(?:ngr?(?![" + V + "])|nr?(?![" + V + "])|r(?![" + V + "]))?", "gi");
 const TONE = {}; "āēīōūǖ".split("").forEach(c => TONE[c] = 1); "áéíóúǘ".split("").forEach(c => TONE[c] = 2); "ǎěǐǒǔǚ".split("").forEach(c => TONE[c] = 3); "àèìòùǜ".split("").forEach(c => TONE[c] = 4);
 const sylTone = s => { for (const c of s.toLowerCase()) if (TONE[c]) return TONE[c]; return 0; };
 const baseOf = s => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/ü|v/g, "u");
@@ -73,10 +75,12 @@ function hzBig(item){
 const isLong = hz => Array.from(String(hz)).length > 3;
 
 /* ---------- содержимое ---------- */
-let C = {decks:[], cards:[], tones:[], prices:[], units:[], audio:{}};
-const ITEM = new Map(), LESSON = new Map(), UNIT_OF = new Map();
+let C = {decks:[], cards:[], tones:[], prices:[], units:[], audio:{}, dialogs:[], sounds:[], plan:null};
+const ITEM = new Map(), LESSON = new Map(), UNIT_OF = new Map(), DLG = new Map(), SND = new Map();
 function indexContent(){
-  ITEM.clear(); LESSON.clear(); UNIT_OF.clear();
+  ITEM.clear(); LESSON.clear(); UNIT_OF.clear(); DLG.clear(); SND.clear();
+  (C.dialogs || []).forEach(d => DLG.set(d.id, d));
+  (C.sounds || []).forEach(g => SND.set(g.id, g));
   C.cards.forEach(c => ITEM.set(c.id, c));
   C.tones.forEach(s => s.items.forEach(it => ITEM.set(it.id, Object.assign({set: s.key, deck: "tones"}, it))));
   C.prices.forEach(p => ITEM.set(p.id, Object.assign({ru: fmtNum(p.n) + " юаней", deck: "prices"}, p)));
@@ -89,11 +93,12 @@ function srcOf(item){
 
 /* ---------- звук ---------- */
 const player = new Audio(); player.preload = "auto"; player.setAttribute("playsinline", "");
-let playToken = 0, actxObj = null;
+let playToken = 0, seqToken = 0, actxObj = null;
 function actx(){ if (!actxObj) { const AC = window.AudioContext || window.webkitAudioContext; actxObj = AC ? new AC() : null; } return actxObj; }
 document.addEventListener("touchend", function unlock(){ const c = actx(); if (c && c.state !== "running") c.resume().catch(() => {}); }, {passive: true});
 function clearPlayer(){ player.onended = player.onerror = player.onplaying = player.ontimeupdate = null; }
-function stopAudio(){ playToken++; clearPlayer(); try { player.pause(); } catch (e) {} $$(".playing").forEach(b => b.classList.remove("playing")); }
+// inSeq — звук внутри цепочки (диалог, повтор за диктором): саму цепочку не обрывать
+function stopAudio(inSeq){ playToken++; if (!inSeq) seqToken++; clearPlayer(); try { player.pause(); } catch (e) {} if (!inSeq) $$(".playing").forEach(b => b.classList.remove("playing")); }
 function setSrc(src){ if (player.dataset.src !== src) { player.src = src; player.dataset.src = src; } }
 // слова уроков лежат одним файлом на урок: играем кусок от a до b
 function playSprite(item, rate, token){
@@ -128,7 +133,7 @@ function playFile(src, rate, token){
 }
 // сказать слово; промис закрывается, когда звук доиграл
 function say(item, opts = {}){
-  stopAudio(); const token = playToken;
+  stopAudio(opts.inSeq); const token = playToken;
   const rate = opts.slow ? .7 : (S.settings.slowVoice ? .85 : 1);
   if (opts.btn) opts.btn.classList.add("playing");
   const p = item.sprite ? playSprite(item, rate, token) : playFile(srcOf(item), rate, token);
@@ -191,7 +196,7 @@ const unitsOf = track => C.units.filter(u => u.track === track);
 function currentLesson(track){
   const f = S.notes && S.notes.focus;
   if (f) { const l = LESSON.get(f) || (C.units.find(u => u.id === f) || {lessons: []}).lessons.find(x => !lessonDone(x)); if (l && UNIT_OF.get(l.id).track === track && !lessonDone(l)) return l; }
-  for (const u of unitsOf(track)) for (const l of u.lessons) if (!lessonDone(l)) return l;
+  for (const u of unitsOf(track)) for (const l of u.lessons) if (!lessonDone(l) && !l.extra) return l;
   return null;
 }
 
@@ -199,7 +204,11 @@ function currentLesson(track){
 // общий запас слов для неправильных вариантов: тот же раздел, потом та же ветка курса
 function poolFor(id){
   const it = ITEM.get(id); if (!it) return [];
-  if (it.deck === "tones" || it.deck === "prices") return [];
+  if (it.deck === "tones" || it.deck === "prices" || it.deck === "snd") return [];
+  if (it.deck === "dlg") {
+    const lines = C.cards.filter(c => c.deck === "dlg" && c.id !== id);
+    return shuffle(lines.filter(c => c.unit === it.unit)).concat(shuffle(lines.filter(c => c.unit !== it.unit)));
+  }
   let unit = null; for (const u of C.units) if (u.lessons.some(l => l.items.includes(id))) { unit = u; break; }
   const same = unit ? [...new Set(unit.lessons.flatMap(l => l.items))] : [];
   const track = unit ? unitsOf(unit.track).flatMap(u => u.lessons.flatMap(l => l.items)) : [];
@@ -273,6 +282,21 @@ function genLesson(l){
     if (speakOn()) shuffle(ids).slice(0, 2).forEach(id => q.push({type: "speak", id}));
   } else if (l.kind === "prices") {
     shuffle(ids).slice(0, 10).forEach(id => q.push({type: "price", id}));
+  } else if (l.kind === "dialog") {
+    // каждый диалог: послушать → ответить на вопросы → текст и повтор; потом реплики по одной
+    (l.dialogs || []).forEach(did => { const d = DLG.get(did); if (!d) return; d.qs.forEach((x, k) => q.push({type: "dlg", dlg: did, q: k})); q.push({type: "dlgText", dlg: did}); });
+    const lines = shuffle(ids.filter(id => ITEM.has(id)));
+    lines.filter(id => sylls(ITEM.get(id).py).length >= 2).slice(0, 2).forEach(id => q.push({type: "l2ru", id}));
+    const b = lines.find(id => { const t = tokensOf(ITEM.get(id)); return t && t.length >= 3 && t.length <= 7; });
+    if (b) q.push({type: "build", id: b});
+    if (speakOn()) { const sp = lines.find(id => { const n = sylls(ITEM.get(id).py).length; return n >= 2 && n <= 8 && canSpeak(ITEM.get(id)); }); if (sp) q.push({type: "speak", id: sp}); }
+  } else if (l.kind === "sounds") {
+    const g = SND.get(l.group);
+    if (g) {
+      if (!repeat) q.push({type: "introSound", group: g.id});
+      const qs = []; g.sets.forEach(row => { qs.push({type: "sound", id: pick(row), set: row}); qs.push({type: "sound", id: pick(row), set: row}); });
+      shuffle(qs).forEach(x => q.push(x));
+    }
   }
   return q;
 }
@@ -296,6 +320,11 @@ function genDrill(kind){
   if (kind === "pair") return shuffle(pairs).slice(0, 10).map(id => ({type: "pair", id}));
   if (kind === "speak") return shuffle(tones).slice(0, 3).concat(shuffle(pairs).slice(0, 4)).map(id => ({type: "speak", id}));
   if (kind === "price") return shuffle(C.prices.map(p => p.id)).slice(0, 10).map(id => ({type: "price", id}));
+  if (kind === "sound") {
+    // чаще группы, где были ошибки или которые ещё не проходил
+    const rows = []; (C.sounds || []).forEach(g => { const L = S.lessons["snd-" + g.id]; const w = !L ? 2 : (L.acc || 100) < 90 ? 3 : 1; g.sets.forEach(r => { for (let k = 0; k < w; k++) rows.push(r); }); });
+    return shuffle(rows).slice(0, 10).map(r => ({type: "sound", id: pick(r), set: r}));
+  }
   return [];
 }
 
@@ -367,7 +396,8 @@ function next(){ stopAudio(); tickActive(); P.i++; renderEx(); autoplay(); }
 function autoplay(){
   if (!P) return; const ex = P.queue[P.i]; if (!ex) return;
   const it = ex.id && ITEM.get(ex.id);
-  if (["intro", "l2ru", "l2zh", "build", "type", "tone", "pair", "price", "introPair", "speak"].includes(ex.type) && it) say(it, {btn: $("#spk")});
+  if (["intro", "l2ru", "l2zh", "build", "type", "tone", "pair", "price", "introPair", "speak", "sound"].includes(ex.type) && it) say(it, {btn: $("#spk")});
+  if (ex.type === "dlg" && ex.q === 0) { const d = DLG.get(ex.dlg); if (d) playDialog(d, {btn: $("#dplay")}); }
   if (ex.type === "introTones") (async () => { for (const id of ex.ids) { const b = $(`[data-say="${id}"]`); if (!b || !P) return; const ok = await say(ITEM.get(id), {btn: b}); if (!ok) return; await wait(250); } })();
 }
 
@@ -407,7 +437,11 @@ const RENDER = {
   price(ex){ priceEx(ex); },
   tone(ex){ toneEx(ex); },
   pair(ex){ pairEx(ex); },
-  speak(ex){ speakEx(ex); }
+  speak(ex){ speakEx(ex); },
+  introSound(ex){ introSoundEx(ex); },
+  sound(ex){ soundEx(ex); },
+  dlg(ex){ dlgEx(ex); },
+  dlgText(ex){ dlgTextEx(ex); }
 };
 
 function choice(ex, mode){
@@ -555,6 +589,85 @@ function pairEx(ex){
     $$("[data-k]").forEach(x => { x.disabled = true; const c = ex.opts[+x.dataset.k].join(""); if (c === key) x.classList.add("right"); else if (+x.dataset.k === sel) x.classList.add("wrong"); });
     answer(ex, ok, {html: `${ansLine(it)}<br>${esc(comboLabel(it.tones))}${key === "33" ? " — два третьих подряд звучат как 2 + 3" : ""}`});
   };
+}
+
+/* ---------- похожие звуки ---------- */
+function introSoundEx(ex){
+  const g = SND.get(ex.group);
+  frame(`<div><span class="tag-new">Похожие звуки</span></div>
+    <div class="ask">${esc(g.key)}<small>Нажимай и сравнивай пары</small></div>
+    <p class="tip">${esc(g.tip)}</p>
+    <div class="sndrows">${g.sets.map(row => `<div class="sndrow n${row.length}">${row.map(id => { const c = ITEM.get(id); return `<button class="opt" data-say="${id}">${py(c.py)}<span class="hz">${esc(c.hz)}</span></button>`; }).join("")}</div>`).join("")}</div>`,
+    `<button class="btn primary" id="check">Дальше</button>`);
+  $$("[data-say]").forEach(b => b.onclick = () => say(ITEM.get(b.dataset.say), {btn: b}));
+  $("#check").onclick = () => { tickActive(); next(); };
+}
+function soundEx(ex){
+  const it = ITEM.get(ex.id);
+  if (!ex.opts) ex.opts = shuffle(ex.set);
+  frame(`<div class="ask">Какой слог звучит?<small>Послушай и выбери. Тон у всех одинаковый — слушай звук</small></div>${listenBtns()}
+    <div class="sndopts n${ex.opts.length}">${ex.opts.map(id => `<button class="opt" data-id="${id}"><span class="sylbig">${py(ITEM.get(id).py)}</span></button>`).join("")}</div>`, checkBtn(true));
+  bindListen(it);
+  let sel = null;
+  $$(".opt[data-id]").forEach(b => b.onclick = () => { if (P.locked) return; sel = b.dataset.id; $$(".opt[data-id]").forEach(x => x.setAttribute("aria-pressed", x === b)); $("#check").disabled = false; });
+  $("#check").onclick = () => {
+    if (!sel) return; const ok = sel === it.id;
+    $$(".opt[data-id]").forEach(x => { x.disabled = true; if (x.dataset.id === it.id) x.classList.add("right"); else if (x.dataset.id === sel) x.classList.add("wrong"); });
+    answer(ex, ok, {html: `Звучало: ${py(it.py)} <span class="hz">${esc(it.hz)}</span> — ${esc(it.ru)}
+      <div class="cmp">${ex.opts.map(id => `<button class="btn" data-cmp="${id}">${I.play}${py(ITEM.get(id).py)}</button>`).join("")}</div>`});
+    $$("[data-cmp]").forEach(b => b.onclick = () => say(ITEM.get(b.dataset.cmp), {btn: b}));
+  };
+}
+
+/* ---------- диалоги на слух ---------- */
+// сыграть диалог целиком: реплика за репликой с паузой; любая другая кнопка звука обрывает цепочку
+async function playDialog(d, opts = {}){
+  stopAudio(); const my = seqToken, btn = opts.btn;
+  if (btn) btn.classList.add("playing");
+  for (let k = 0; k < d.lines.length; k++) {
+    const mark = $$(`[data-line="${k}"]`);
+    mark.forEach(m => m.classList.add("on"));
+    const ok = await say(ITEM.get(d.lines[k]), {slow: opts.slow, inSeq: true});
+    mark.forEach(m => m.classList.remove("on"));
+    if (!ok || my !== seqToken) break;
+    await wait(opts.slow ? 650 : 420);
+    if (my !== seqToken) break;
+  }
+  if (btn) btn.classList.remove("playing");
+}
+function dlgEx(ex){
+  const d = DLG.get(ex.dlg), qq = d.qs[ex.q];
+  if (!ex.opts) ex.opts = shuffle([qq.a].concat(qq.x));
+  frame(`<div class="ask">${ex.q === 0 && !ex.retry ? "Послушай диалог" : "Послушай ещё раз"}<small>${esc(d.title)} · ${d.lines.length} ${plural(d.lines.length, "реплика", "реплики", "реплик")}, текст — после вопросов</small></div>
+    <div class="listen"><button class="speaker" id="dplay" aria-label="Слушать диалог">${I.play}</button><button class="turtle" id="dslow" aria-label="Медленно">${I.turtle}</button></div>
+    <div class="dlgdots">${d.lines.map((id, k) => `<i class="${ITEM.get(id).who === "M" ? "m" : "f"}" data-line="${k}"></i>`).join("")}</div>
+    <div class="qtext">${esc(qq.q)}</div>
+    <div class="list">${ex.opts.map((o, k) => `<button class="opt" data-k="${k}">${esc(o)}</button>`).join("")}</div>`, checkBtn(true));
+  const pb = $("#dplay");
+  pb.onclick = () => playDialog(d, {btn: pb});
+  $("#dslow").onclick = () => playDialog(d, {btn: pb, slow: true});
+  let sel = -1;
+  $$(".list .opt").forEach(b => b.onclick = () => { if (P.locked) return; sel = +b.dataset.k; $$(".list .opt").forEach(x => x.setAttribute("aria-pressed", x === b)); $("#check").disabled = false; });
+  $("#check").onclick = () => {
+    if (sel < 0) return; stopAudio();
+    const ok = ex.opts[sel] === qq.a;
+    $$(".list .opt").forEach(x => { x.disabled = true; const o = ex.opts[+x.dataset.k]; if (o === qq.a) x.classList.add("right"); else if (+x.dataset.k === sel) x.classList.add("wrong"); });
+    answer(ex, ok, {html: `Ответ: ${esc(qq.a)}`});
+  };
+}
+function chatHTML(ids){
+  return `<div class="chat">${ids.map((id, k) => { const it = ITEM.get(id); return `<button class="bubble ${it.who === "M" ? "m" : "f"}" data-say="${id}" data-line="${k}"><span class="hz">${esc(it.hz)}</span>${py(it.py)}<span class="ru">${esc(it.ru)}</span></button>`; }).join("")}</div>`;
+}
+function dlgTextEx(ex){
+  const d = DLG.get(ex.dlg);
+  frame(`<div class="ask">Текст диалога<small>${esc(d.title)} · нажми на реплику — послушать</small></div>
+    ${chatHTML(d.lines)}
+    <div class="row wrap" style="justify-content:center"><button class="btn" id="dAll">${I.play}Весь диалог</button><button class="btn" id="dShadow">${I.speak}Повторять за диктором</button></div>`,
+    `<button class="btn primary" id="check">Дальше</button>`);
+  $$("[data-say]").forEach(b => b.onclick = () => say(ITEM.get(b.dataset.say), {btn: b}));
+  const all = $("#dAll"); all.onclick = () => playDialog(d, {btn: all});
+  $("#dShadow").onclick = () => openShadow(d.lines, d.title);
+  $("#check").onclick = () => { tickActive(); next(); };
 }
 
 /* ---------- говорить: микрофон, распознавание речи, мелодия голоса ---------- */
@@ -829,6 +942,92 @@ function speakEx(ex){
   };
 }
 
+/* ---------- повтор за диктором: без рук — фраза, пауза на повтор, следующая ---------- */
+const SH = {ids: [], i: 0, title: "", playing: false, phase: "", said: 0, t0: 0, ms: 0};
+const shSet = () => ({gap: S.settings.shGap || 1.5, rep: S.settings.shRep || 2, slow: !!S.settings.shSlow, hide: !!S.settings.shHide});
+function openShadow(ids, title){
+  ids = (ids || []).filter(id => ITEM.has(id) && canSpeak(ITEM.get(id)));
+  if (!ids.length) { toast("Здесь пока нечего повторять"); return; }
+  stopAudio(); closeSheet();
+  if (P) tickActive();
+  Object.assign(SH, {ids, i: 0, title, playing: false, phase: "", said: 0, t0: 0, ms: 0, open: Date.now(), reveal: false});
+  $("#shadow").hidden = false;
+  renderShadow();
+}
+function shTick(){ if (SH.t0) { SH.ms += Math.min(Date.now() - SH.t0, 5 * MIN); SH.t0 = SH.playing ? Date.now() : 0; } }
+function closeShadow(){
+  SH.playing = false; stopAudio(); shTick();
+  const sec = Math.round(SH.ms / 1000);
+  if (sec >= 20 || SH.said >= 3) {
+    const d = today(); d.sec = (d.sec || 0) + sec; d.done = d.done || {}; d.done.shadow = (d.done.shadow || 0) + 1;
+    d.xp = (d.xp || 0) + Math.min(10, SH.said); touch(); Sync.flushSoon();
+  }
+  $("#shadow").hidden = true; $("#shadow").innerHTML = "";
+  if (P) P.shownAt = Date.now(); else render();
+}
+function setPhase(ph, ms){
+  SH.phase = ph;
+  const el = $("#shPhase"), card = $(".shcard"), bar = $("#shGap");
+  if (card) card.className = "shcard " + ph;
+  if (el) el.textContent = ph === "nat" ? "Слушай" : ph === "you" ? "Твоя очередь — повтори вслух" : SH.i >= SH.ids.length - 1 && SH.done ? "Готово! Можно ещё раз" : "Нажми ▶ и повторяй в паузах";
+  if (bar) { bar.style.transition = "none"; bar.style.width = "0%"; if (ph === "you" && ms) { void bar.offsetWidth; bar.style.transition = `width ${ms}ms linear`; bar.style.width = "100%"; } }
+}
+async function shadowLoop(){
+  stopAudio(); const my = seqToken; SH.playing = true; SH.done = false; SH.t0 = Date.now(); renderShadow();
+  while (SH.playing && my === seqToken) {
+    const it = ITEM.get(SH.ids[SH.i]), st = shSet();
+    for (let r = 0; r < st.rep; r++) {
+      setPhase("nat");
+      const t1 = Date.now(), ok = await say(it, {slow: st.slow, inSeq: true});
+      if (!ok || my !== seqToken || !SH.playing) return;
+      const pause = Math.round(Math.min(9000, (Date.now() - t1) * st.gap + 500));
+      setPhase("you", pause);
+      await wait(pause);
+      if (my !== seqToken || !SH.playing) return;
+    }
+    SH.said++;
+    if (SH.i < SH.ids.length - 1) { SH.i++; SH.reveal = false; renderShadow(); }
+    else { SH.playing = false; SH.done = true; shTick(); renderShadow(); sfx(true); return; }
+  }
+}
+function renderShadow(){
+  const el = $("#shadow"), n = SH.ids.length, it = ITEM.get(SH.ids[SH.i]), st = shSet();
+  const pauseI = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.2"/><rect x="14" y="5" width="4" height="14" rx="1.2"/></svg>';
+  const segBtns = (k, vals, lab) => `<div class="seg" role="group" aria-label="${lab}">${vals.map(([v, t]) => `<button data-sh="${k}" data-v="${v}" aria-pressed="${st[k] === v}">${t}</button>`).join("")}</div>`;
+  el.innerHTML = `<div class="ls-top"><button class="ls-close" id="shClose" aria-label="Закрыть">${I.close}</button>
+      <div class="ls-bar" role="progressbar" aria-valuenow="${SH.i + 1}" aria-valuemin="1" aria-valuemax="${n}"><i style="width:${Math.round((SH.i + (SH.done ? 1 : 0)) / n * 100)}%"></i></div>
+      <div class="ls-xp" style="color:var(--ink-3)">${SH.i + 1}/${n}</div></div>
+    <div class="ls-body">
+      <div class="ask">Повтор за диктором<small>${esc(SH.title)}</small></div>
+      <div class="shcard ${SH.phase}">
+        <div class="phase" id="shPhase"></div>
+        <button class="big shtext ${st.hide && !SH.reveal ? "hidetext" : ""}" id="shText" aria-label="Показать текст">${hzBig(it)}${py(it.py)}<span class="ru">${esc(it.ru || "")}</span><span class="shhint">нажми — показать текст</span></button>
+        <div class="gapbar"><i id="shGap"></i></div>
+      </div>
+      <div class="shctl"><button class="turtle" id="shPrev" aria-label="Назад"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 5h2v14H7zM19 5.5v13a.5.5 0 0 1-.8.4L10 12.4a.5.5 0 0 1 0-.8l8.2-6.5a.5.5 0 0 1 .8.4z"/></svg></button>
+        <button class="speaker" id="shPlay" aria-label="${SH.playing ? "Пауза" : "Играть"}">${SH.playing ? pauseI : I.play}</button>
+        <button class="turtle" id="shNext" aria-label="Дальше"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M15 5h2v14h-2zM5 5.5v13a.5.5 0 0 0 .8.4L14 12.4a.5.5 0 0 0 0-.8L5.8 5.1a.5.5 0 0 0-.8.4z"/></svg></button></div>
+      <p class="hint">Слушаешь фразу — в паузе говоришь вслух той же мелодией. Экран не гаси: на iPhone звук остановится.</p>
+      <div class="sec-title" style="margin-top:4px">Пауза на повтор</div>
+      ${segBtns("gap", [[1, "короче"], [1.5, "обычная"], [2, "длиннее"]], "Пауза")}
+      <div class="sec-title">Сколько раз каждую фразу</div>
+      ${segBtns("rep", [[1, "1 раз"], [2, "2 раза"], [3, "3 раза"]], "Повторов")}
+      <div class="card" style="padding:4px 16px">
+        <div class="setrow"><span class="lab">Медленнее</span><button class="switch" role="switch" aria-checked="${st.slow}" data-shsw="shSlow" aria-label="Медленнее"></button></div>
+        <div class="setrow"><span class="lab">Сначала без текста<small>Текст появится по нажатию</small></span><button class="switch" role="switch" aria-checked="${st.hide}" data-shsw="shHide" aria-label="Без текста"></button></div>
+      </div>
+    </div>
+    <div class="ls-foot"><button class="btn primary" id="shDone">${SH.done ? "Готово" : "Закончить"}</button></div>`;
+  setPhase(SH.playing ? SH.phase || "nat" : "");
+  $("#shClose").onclick = closeShadow; $("#shDone").onclick = closeShadow;
+  $("#shPlay").onclick = () => { if (SH.playing) { SH.playing = false; stopAudio(); shTick(); renderShadow(); } else { if (SH.done) { SH.i = 0; SH.done = false; } shadowLoop(); } };
+  const jump = k => { const was = SH.playing; SH.playing = false; stopAudio(); shTick(); SH.i = Math.max(0, Math.min(n - 1, SH.i + k)); SH.done = false; SH.reveal = false; if (was) shadowLoop(); else { renderShadow(); say(ITEM.get(SH.ids[SH.i]), {slow: st.slow}); } };
+  $("#shPrev").onclick = () => jump(-1); $("#shNext").onclick = () => jump(1);
+  $("#shText").onclick = () => { if (st.hide && !SH.reveal) { SH.reveal = true; $("#shText").classList.remove("hidetext"); } else if (!SH.playing) say(it, {slow: st.slow}); };
+  $$("[data-sh]").forEach(b => b.onclick = () => { S.settings["sh" + b.dataset.sh[0].toUpperCase() + b.dataset.sh.slice(1)] = +b.dataset.v; save(); $$(`[data-sh="${b.dataset.sh}"]`).forEach(x => x.setAttribute("aria-pressed", x === b)); });
+  $$("[data-shsw]").forEach(b => b.onclick = () => { const k = b.dataset.shsw; S.settings[k] = !S.settings[k]; save(); b.setAttribute("aria-checked", S.settings[k]); if (k === "shHide") { SH.reveal = false; $("#shText").classList.toggle("hidetext", S.settings[k]); } });
+}
+
 /* ---------- итог урока ---------- */
 function finish(){
   tickActive();
@@ -837,12 +1036,14 @@ function finish(){
   let bonus = 0;
   if (meta.lesson) { bonus = 5 + (acc >= 90 ? 5 : 0); const L = S.lessons[meta.lesson] || (S.lessons[meta.lesson] = {n: 0, best: 0}); L.n++; L.best = Math.max(L.best || 0, acc); L.last = Date.now(); L.acc = acc; d.lessons = (d.lessons || 0) + 1; }
   else d.reviews = (d.reviews || 0) + 1;
+  const kind = meta.kind || (meta.lesson && LESSON.get(meta.lesson) ? LESSON.get(meta.lesson).kind : "");
+  if (kind) { d.done = d.done || {}; d.done[kind] = (d.done[kind] || 0) + 1; }
   const xp = P.xp + bonus;
   const before = d.sec || 0;
   d.xp = (d.xp || 0) + xp; d.sec = before + sec; d.right = (d.right || 0) + P.right; d.wrong = (d.wrong || 0) + P.wrong;
   d.speak = [(d.speak || [0, 0])[0] + P.speak[0], (d.speak || [0, 0])[1] + P.speak[1]];
   let fresh = 0;
-  P.seen.forEach(id => { if (!ITEM.has(id)) return; if (!S.srs[id]) fresh++; srsApply(id, !P.miss.has(id)); });
+  P.seen.forEach(id => { if (!ITEM.has(id) || ITEM.get(id).deck === "snd") return; if (!S.srs[id]) fresh++; srsApply(id, !P.miss.has(id)); });
   d.words = (d.words || 0) + fresh;
   touch(); Sync.flushSoon();
   const goalHit = before < goalSec() && d.sec >= goalSec();
@@ -868,18 +1069,22 @@ function openSheet(html, acts){
 }
 function closeSheet(){ const w = $("#sheet"); w.hidden = true; w.innerHTML = ""; }
 function wordRows(ids){
-  return `<div class="words">${ids.map(id => { const c = ITEM.get(id); if (!c) return ""; return `<button class="word" data-play="${id}"><span class="playmini">${I.play}</span><span><span class="hz">${esc(c.hz)}</span> ${py(c.py)}<br><span class="ru">${esc(c.ru || "")}</span></span></button>`; }).join("")}</div>`;
+  return `<div class="words">${ids.map(id => { const c = ITEM.get(id); if (!c) return ""; return `<button class="word" data-play="${id}"><span class="playmini">${I.play}</span><span><span class="hz">${esc(c.hz)}</span> ${py(c.py)}<br><span class="ru">${esc(c.ru || "")}</span>${c.check ? ` <span class="tagchk">сверить с книгой</span>` : ""}</span></button>`; }).join("")}</div>`;
 }
 function bindPlays(root){ $$("[data-play]", root).forEach(b => b.onclick = () => say(ITEM.get(b.dataset.play), {btn: $(".playmini", b)})); }
 function lessonSheet(l){
   const u = UNIT_OF.get(l.id), done = lessonDone(l), st = S.lessons[l.id] || {};
-  const kindTxt = {words: "Новые слова", phrases: "Фразы", review: "Повторение раздела", tones: "Тоны", pairs: "Пары тонов", prices: "Цены на слух"}[l.kind];
-  const list = l.kind === "review" ? `<p class="muted" style="margin:10px 0 14px">${l.items.length} ${plural(l.items.length, "слово", "слова", "слов")} раздела, сначала те, где были ошибки.</p>` : wordRows(l.items);
+  const kindTxt = l.extra ? "Дополнительно — по желанию" : {words: "Новые слова", phrases: "Фразы", review: "Повторение раздела", tones: "Тоны", pairs: "Пары тонов", prices: "Цены на слух", dialog: "Диалоги на слух", sounds: "Похожие звуки"}[l.kind];
+  let list = l.kind === "review" ? `<p class="muted" style="margin:10px 0 14px">${l.items.length} ${plural(l.items.length, "слово", "слова", "слов")} раздела, сначала те, где были ошибки.</p>` : wordRows(l.items);
+  if (l.kind === "dialog") list = `<div class="words">${(l.dialogs || []).map(did => { const d = DLG.get(did); return d ? `<div class="word" style="grid-template-columns:1fr"><span><b>${esc(d.title)}</b><br><span class="ru">${d.lines.length} ${plural(d.lines.length, "реплика", "реплики", "реплик")} · ${d.qs.length} ${plural(d.qs.length, "вопрос", "вопроса", "вопросов")}</span></span></div>` : ""; }).join("")}</div>
+    <p class="small muted" style="margin-bottom:12px">Сначала только на слух, текст — после вопросов. Диалоги Claude написал из слов урока — это не тексты книги.</p>`;
+  if (l.kind === "sounds") list = `<p class="tip" style="margin:10px 0 4px">${esc((SND.get(l.group) || {}).tip || "")}</p>${wordRows(l.items)}`;
   openSheet(`<div class="eyebrow">${esc(u.name)}${u.title ? ` · <span class="hz">${esc(u.title)}</span>` : ""}</div>
     <h2 style="margin-top:4px">${esc(l.title)}</h2>
     <p class="muted small" style="margin-top:4px">${esc(kindTxt)}${done ? ` · пройдено ${st.n} ${plural(st.n, "раз", "раза", "раз")}, лучший результат ${st.best}%` : ""}</p>
     ${list}
-    ${u.book ? `<p class="small muted" style="margin-bottom:12px">Слова взяты из списков учеников в интернете. Пришли Claude фото страницы «生词» — сверит с твоей книгой.</p>` : ""}
+    ${l.extra ? `<p class="small muted" style="margin-bottom:12px">Дополнительные слова урока и слова, которых может не быть в твоём издании книги. Не обязательно — план дня их не считает.</p>` : ""}
+    ${u.book && (l.kind === "words" || l.kind === "review") ? `<p class="small muted" style="margin-bottom:12px">${esc(BOOK_NOTE)}</p>` : ""}
     <button class="btn primary block" data-act="go">${done ? "Пройти ещё раз" : "Начать"}</button>`,
     {go: () => startLesson(l)});
   bindPlays($("#sheet"));
@@ -913,6 +1118,112 @@ function noteCard(){
   const n = S.notes; if (!n || !n.text) return "";
   return `<div class="note"><div class="eyebrow">Claude · ${esc(n.date || "")}</div><div style="white-space:pre-line">${esc(n.text)}</div></div>`;
 }
+/* ---------- план дня ---------- */
+const BOOK_NOTE = "Слова — по спискам из интернета, Claude их сверил. Если в твоей книге не так — пришли фото страницы «生词».";
+const doneToday = l => !!l && ((S.lessons[l.id] || {}).last || 0) >= dayStart();
+const stepDone = st => st.of === 0 || st.n >= st.of;
+function planDay(){
+  const k = dayKey(), day = ((C.plan && C.plan.days) || []).find(d => d.d === k);
+  if (day) return Object.assign({auto: false}, day);
+  // вне расписания: следующий непройденный раздел учебника и самая слабая группа звуков
+  const cur = currentLesson("book"), u = cur ? UNIT_OF.get(cur.id) : null;
+  const score = g => { const L = S.lessons["snd-" + g.id]; return L ? 100 + (L.acc || 0) : 0; };
+  const g = (C.sounds || []).slice().sort((a, b) => score(a) - score(b))[0];
+  return {d: k, units: u ? [u.id] : [], snd: g ? [g.id] : [], auto: true};
+}
+function planSteps(day){
+  const d = S.days[dayKey()] || {}, done = d.done || {}, man = d.plan || {};
+  const units = (day.units || []).map(id => C.units.find(u => u.id === id)).filter(Boolean);
+  const words = units.flatMap(u => u.lessons.filter(l => l.kind === "words" && !l.extra));
+  const dlgs = units.flatMap(u => u.lessons.filter(l => l.kind === "dialog"));
+  const snds = (day.snd || []).map(g => LESSON.get("snd-" + g)).filter(Boolean);
+  const first = ls => ls.find(l => !lessonDone(l)) || ls[0];
+  const lines = dlgs.flatMap(l => l.items), due = dueIds().length;
+  const toneOk = done.tone || done.pair || done.tones || done.pairs ? 1 : 0;
+  return [
+    {id: "snd", title: "Звуки и тоны", sub: (snds.length ? snds.map(l => l.title).join(" · ") + " и тоны" : "тоны") + " · 20 мин",
+     n: snds.filter(doneToday).length + toneOk, of: snds.length + 1,
+     go: () => { const l = snds.find(x => !doneToday(x)); if (l) return startLesson(l); openPlayer(genDrill("tone"), {title: "Какой тон?", kind: "tone"}); autoplay(); }},
+    {id: "words", title: units.length ? "Слова: " + units.map(u => u.name.toLowerCase()).join(", ") : "Слова урока", sub: "с озвучкой и микрофоном · 25 мин",
+     n: words.filter(lessonDone).length, of: words.length, go: () => { const l = first(words); if (l) startLesson(l); }},
+    {id: "dialog", title: "Диалоги на слух", sub: "послушай и ответь · 20 мин",
+     n: dlgs.filter(lessonDone).length, of: dlgs.length, go: () => { const l = first(dlgs); if (l) startLesson(l); }},
+    {id: "review", title: "Повторить слова", sub: (due ? `${due} ${plural(due, "слово ждёт", "слова ждут", "слов ждут")}` : "всё повторено") + " · 10 мин",
+     n: !due || d.reviews ? 1 : 0, of: 1, go: () => { if (!due) return toast("Всё повторено — можно дальше"); openPlayer(genReview(dueIds().slice(0, 15)), {title: "Повторение"}); autoplay(); }},
+    {id: "shadow", title: "Повтор за диктором", sub: "диалоги урока вслух · 10 мин",
+     n: done.shadow ? 1 : 0, of: 1, go: () => lines.length ? openShadow(lines, "Диалоги: " + units.map(u => u.name).join(", ")) : shadowSheet()},
+    {id: "hw", title: "Домашка курса и аудио учебника", sub: "по книге и тетради, отметь сам · 35 мин", manual: true, n: man.hw ? 1 : 0, of: 1}
+  ];
+}
+function planCard(){
+  if (!C.plan) return "";
+  const day = planDay(), steps = planSteps(day), ok = steps.filter(stepDone).length;
+  const names = (day.units || []).map(id => (C.units.find(u => u.id === id) || {}).name).filter(Boolean);
+  if (ok === steps.length && !S.ui.planOpen) return `<button class="card plan closed" id="planOpen"><i class="ck">${stroke(I.check)}</i><span class="grow"><b>План на сегодня выполнен</b><small>${ok} из ${steps.length} · так держать!</small></span>${I.chev}</button>`;
+  return `<div class="card plan">
+    <div class="plan-head"><div class="grow"><div class="eyebrow">План на сегодня · 2 часа</div><b>${esc(names.length ? names.join(" и ") : "Повторение")}</b></div><span class="plan-ring">${ringSVG(ok / steps.length)}<b>${ok}/${steps.length}</b></span></div>
+    ${day.note ? `<p class="small muted">${esc(day.note)}</p>` : ""}
+    <div class="steps">${steps.map(st => `<button class="step ${stepDone(st) ? "done" : ""}" data-step="${st.id}"><i class="ck">${stepDone(st) ? stroke(I.check) : ""}</i><span class="grow"><b>${esc(st.title)}</b><small>${esc(st.sub)}</small></span>${st.manual ? `<span class="cnt">${stepDone(st) ? "сделано" : "отметить"}</span>` : st.of > 1 ? `<span class="cnt">${Math.min(st.n, st.of)}/${st.of}</span>` : ""}</button>`).join("")}</div>
+    <div class="row" style="justify-content:space-between"><button class="linkbtn" id="planAll">Весь план</button><button class="linkbtn" id="planBad">Плохой день?</button></div>
+  </div>`;
+}
+function bindPlan(){
+  const steps = planSteps(planDay());
+  $$("[data-step]").forEach(b => b.onclick = () => {
+    const st = steps.find(x => x.id === b.dataset.step); if (!st) return;
+    if (st.manual) { const d = today(); d.plan = d.plan || {}; d.plan[st.id] = !d.plan[st.id]; touch(); renderLearn(); return; }
+    st.go();
+  });
+  const po = $("#planOpen"); if (po) po.onclick = () => { S.ui.planOpen = true; save(); renderLearn(); };
+  const pa = $("#planAll"); if (pa) pa.onclick = planSheet;
+  const pb = $("#planBad"); if (pb) pb.onclick = () => openSheet(`<h2>Плохой день</h2>
+    <p style="margin:10px 0">Минимум 30 минут — и день засчитан:</p>
+    <div class="steps"><div class="step"><i class="ck"></i><span class="grow"><b>10 минут — звуки</b><small>одна группа «Похожие звуки» или «Какой тон?»</small></span></div>
+    <div class="step"><i class="ck"></i><span class="grow"><b>10 минут — слова</b><small>один урок «Слова» или повторение</small></span></div>
+    <div class="step"><i class="ck"></i><span class="grow"><b>10 минут — на слух</b><small>один диалог или повтор за диктором в наушниках</small></span></div></div>
+    <p class="muted small" style="margin:12px 0">Главное правило — не пропускать два дня подряд.</p>
+    <button class="btn primary block" data-act="ok">Понятно</button>`, {ok: closeSheet});
+}
+function planSheet(){
+  const days = (C.plan && C.plan.days) || [], k = dayKey(), WD = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
+  const rows = days.map(d => {
+    const units = d.units.map(id => C.units.find(u => u.id === id)).filter(Boolean);
+    const ls = units.flatMap(u => u.lessons.filter(l => (l.kind === "words" && !l.extra) || l.kind === "dialog"));
+    const dn = ls.filter(lessonDone).length, full = ls.length > 0 && dn === ls.length, dt = new Date(d.d + "T12:00:00");
+    return `<div class="dayrow ${d.d === k ? "today" : ""} ${full ? "done" : ""}"><span class="dd">${dt.getDate()}.${String(dt.getMonth() + 1).padStart(2, "0")}<small>${WD[dt.getDay()]}</small></span>
+      <span class="grow"><b>${esc(units.map(u => u.name).join(" и "))}</b><small class="hz">${esc(units.map(u => u.title).join(" · "))}</small></span><span class="cnt">${full ? "✓" : dn + "/" + ls.length}</span></div>`;
+  }).join("");
+  openSheet(`<h2>${esc((C.plan && C.plan.title) || "План")}</h2>
+    <p class="small muted" style="margin:6px 0 10px">Каждый день около 2 часов: звуки → слова урока → диалоги на слух → повторение → повтор за диктором → домашка курса. После последнего дня приложение само берёт следующий урок.</p>
+    <div class="days">${rows}</div>
+    <p class="small muted" style="margin:10px 0 14px">Если на парах уже другой урок — скажи Claude номер, план сдвинется.</p>
+    <button class="btn primary block" data-act="ok">Понятно</button>`, {ok: closeSheet});
+}
+function syncHint(){
+  if (Sync.cfg() || (S.ui.syncHideUntil || 0) > Date.now()) return "";
+  return `<div class="card install"><span class="ic-sync">${stroke(I.star)}</span><div class="grow"><b>Claude пока не видит твой прогресс</b><p class="small muted" style="margin-top:4px">Подключи один раз — 3 минуты. Тогда Claude подстроит план под твои ошибки.</p><button class="btn block" id="goSync" style="margin-top:10px">Подключить</button></div><button class="ls-close" id="hideSync" aria-label="Скрыть на 3 дня">${I.close}</button></div>`;
+}
+function bindSyncHint(){
+  const g = $("#goSync"); if (g) g.onclick = () => { tab = "me"; render(); view().scrollTop = 0; setTimeout(() => { const c = $("#syncCard"); if (c) c.scrollIntoView({block: "center"}); }, 60); };
+  const h = $("#hideSync"); if (h) h.onclick = () => { S.ui.syncHideUntil = Date.now() + 3 * DAY; save(); renderLearn(); };
+}
+function shadowSheet(){
+  const day = planDay(), units = (day.units || []).map(id => C.units.find(u => u.id === id)).filter(Boolean);
+  const dl = units.flatMap(u => u.lessons.filter(l => l.kind === "dialog").flatMap(l => l.items));
+  const doneDl = C.units.filter(u => u.track === "book").flatMap(u => u.lessons.filter(l => l.kind === "dialog" && lessonDone(l)).flatMap(l => l.items));
+  const words = units.flatMap(u => u.lessons.filter(l => l.kind === "words" && !l.extra).flatMap(l => l.items));
+  const deck = k => C.cards.filter(c => c.deck === k).map(c => c.id);
+  const src = [
+    dl.length && {k: "dl", t: "Диалоги урока дня", s: units.map(u => u.name).join(", ") + ` · ${dl.length} ${plural(dl.length, "фраза", "фразы", "фраз")}`, ids: dl},
+    doneDl.length && {k: "done", t: "Все пройденные диалоги", s: `${doneDl.length} ${plural(doneDl.length, "фраза", "фразы", "фраз")} вперемешку`, ids: shuffle(doneDl)},
+    words.length && {k: "w", t: "Слова урока дня", s: `${words.length} ${plural(words.length, "слово", "слова", "слов")}`, ids: words},
+    {k: "life", t: "Фразы для жизни", s: "кафе, такси, оплата", ids: deck("life")},
+    {k: "market", t: "Фразы для рынка", s: "цены, торг, поставщик", ids: deck("market")}
+  ].filter(Boolean);
+  openSheet(`<h2>Повтор за диктором</h2><p class="small muted" style="margin:6px 0 12px">Фраза → пауза → ты повторяешь вслух той же мелодией. Можно в наушниках, без рук.</p>
+    <div class="stack">${src.map(x => `<button class="btn block srcbtn" data-act="${x.k}"><span class="grow"><b>${esc(x.t)}</b><small>${esc(x.s)}</small></span>${I.play}</button>`).join("")}</div>`,
+    Object.fromEntries(src.map(x => [x.k, () => openShadow(x.ids, x.t)])));
+}
 function renderLearn(){
   renderTop("Учиться");
   const track = S.ui.track, cur = currentLesson(track), curUnit = cur && UNIT_OF.get(cur.id);
@@ -924,7 +1235,7 @@ function renderLearn(){
   const units = unitsOf(track);
   const openSet = S.ui.open || {};
   const html = units.map((u, ui) => {
-    const n = u.lessons.length, dn = u.lessons.filter(lessonDone).length, isOpen = openSet[u.id] != null ? openSet[u.id] : (curUnit ? curUnit.id === u.id : ui === 0);
+    const main = u.lessons.filter(l => !l.extra), n = main.length, dn = main.filter(lessonDone).length, isOpen = openSet[u.id] != null ? openSet[u.id] : (curUnit ? curUnit.id === u.id : ui === 0);
     const no = track === "book" ? u.name.replace(/\D/g, "") : String(ui + 1);
     const offs = [0, 44, 62, 44, 0, -44, -62, -44];
     return `<section class="unit ${isOpen ? "open" : ""} ${dn === n ? "done" : ""}" data-unit="${u.id}">
@@ -936,7 +1247,7 @@ function renderLearn(){
       ${isOpen ? `<div class="path">${u.lessons.map((l, k) => {
         const done = lessonDone(l), isCur = cur && cur.id === l.id;
         const icon = l.kind === "review" ? stroke(I.star) : done ? stroke(I.check) : String(k + 1);
-        return `<div class="node ${done ? "done" : ""} ${isCur ? "cur" : ""}" style="transform:translateX(${offs[k % offs.length]}px)">
+        return `<div class="node ${done ? "done" : ""} ${isCur ? "cur" : ""} ${l.extra ? "extra" : ""}" style="transform:translateX(${offs[k % offs.length]}px)">
           ${isCur ? `<span class="startflag">${done ? "ЕЩЁ РАЗ" : "НАЧАТЬ"}</span>` : ""}
           <button class="node-btn" data-lesson="${l.id}" aria-label="${esc(l.title)}">${icon}</button>
           <span class="node-lab">${esc(l.title)}</span></div>`;
@@ -944,14 +1255,15 @@ function renderLearn(){
     </section>`;
   }).join("");
   view().innerHTML = `<div class="stack">
+    ${install}${warn}${noteCard()}${planCard()}${syncHint()}
     <div class="seg" role="group" aria-label="Ветка курса">${TRACKS.map(tr => `<button data-track="${tr.id}" aria-pressed="${tr.id === track}">${esc(tr.name)}</button>`).join("")}</div>
-    ${install}${warn}${noteCard()}
     ${cur ? `<button class="btn primary block cont" data-lesson="${cur.id}"><span>${lessonDone(cur) ? "Повторить" : "Продолжить"}</span><small>${esc(UNIT_OF.get(cur.id).name)} · ${esc(cur.title)}</small></button>` : `<div class="card">Вся ветка пройдена. Повторяй слова во вкладке «Повторить».</div>`}
   </div>${html}<div style="height:12px"></div>`;
   $$("[data-track]").forEach(b => b.onclick = () => { S.ui.track = b.dataset.track; save(); renderLearn(); view().scrollTop = 0; });
   $$("[data-toggle]").forEach(b => b.onclick = () => { const id = b.dataset.toggle, sec = b.closest(".unit"); S.ui.open = S.ui.open || {}; S.ui.open[id] = !sec.classList.contains("open"); save(); renderLearn(); });
   $$("[data-lesson]").forEach(b => b.onclick = () => lessonSheet(LESSON.get(b.dataset.lesson)));
   $$("[data-hide]").forEach(b => b.onclick = () => { S.ui.installHidden = true; save(); renderLearn(); });
+  bindPlan(); bindSyncHint();
 }
 function renderReview(){
   renderTop("Повторить");
@@ -971,7 +1283,7 @@ function renderReview(){
   bindPlays(view());
 }
 function renderTones(){
-  renderTop("Тоны");
+  renderTop("Слух");
   const ma = C.tones[0] ? C.tones[0].items : [];
   const combos = [];
   [1, 2, 3, 4].forEach(a => [1, 2, 3, 4, 0].forEach(b => { const c = C.cards.find(x => x.deck === "pairs" && x.tones && x.tones[0] === a && x.tones[1] === b); if (c) combos.push(c); }));
@@ -980,6 +1292,8 @@ function renderTones(){
     <div class="modes">
       <button class="mode" data-drill="tone"><span class="ic">${I.ear}</span><span><b>Какой тон?</b><br><span>10 слогов на слух</span></span></button>
       <button class="mode" data-drill="pair"><span class="ic">${I.pairs}</span><span><b>Пары тонов</b><br><span>10 слов из двух слогов</span></span></button>
+      <button class="mode" data-drill="sound"><span class="ic">${I.similar}</span><span><b>Похожие звуки</b><br><span>zh — z, b — p, an — ang…</span></span></button>
+      <button class="mode" data-drill="shadow"><span class="ic">${I.wave}</span><span><b>Повтор за диктором</b><br><span>слушай → повтори, без рук</span></span></button>
       <button class="mode" data-drill="speak"><span class="ic">${I.speak}</span><span><b>Скажи сам</b><br><span>микрофон и мелодия голоса</span></span></button>
       <button class="mode" data-drill="price"><span class="ic">${I.coin}</span><span><b>Цены на слух</b><br><span>как на рынке</span></span></button>
     </div>
@@ -991,8 +1305,9 @@ function renderTones(){
   $$("[data-play]").forEach(b => b.onclick = () => say(ITEM.get(b.dataset.play), {btn: b}));
   $$("[data-drill]").forEach(b => b.onclick = () => {
     const k = b.dataset.drill;
+    if (k === "shadow") return shadowSheet();
     if (k === "speak" && !speakOn()) { S.speakOffUntil = 0; save(); }
-    openPlayer(genDrill(k), {title: {tone: "Какой тон?", pair: "Пары тонов", speak: "Скажи сам", price: "Цены на слух"}[k]}); autoplay();
+    openPlayer(genDrill(k), {title: {tone: "Какой тон?", pair: "Пары тонов", speak: "Скажи сам", price: "Цены на слух", sound: "Похожие звуки"}[k], kind: k}); autoplay();
   });
 }
 function renderMe(){
@@ -1067,7 +1382,11 @@ const Sync = {
     if (!r || typeof r !== "object") return;
     for (const id in r.srs || {}) { const a = S.srs[id], b = r.srs[id]; if (!a || (b.n || 0) > (a.n || 0)) S.srs[id] = b; }
     for (const id in r.lessons || {}) { const a = S.lessons[id], b = r.lessons[id]; if (!a) S.lessons[id] = b; else { a.n = Math.max(a.n || 0, b.n || 0); a.best = Math.max(a.best || 0, b.best || 0); } }
-    for (const k in r.days || {}) { const a = S.days[k], b = r.days[k]; if (!a) { S.days[k] = b; continue; } for (const f of ["xp", "sec", "lessons", "reviews", "right", "wrong", "words"]) a[f] = Math.max(a[f] || 0, b[f] || 0); }
+    for (const k in r.days || {}) {
+      const a = S.days[k], b = r.days[k]; if (!a) { S.days[k] = b; continue; }
+      for (const f of ["xp", "sec", "lessons", "reviews", "right", "wrong", "words"]) a[f] = Math.max(a[f] || 0, b[f] || 0);
+      for (const f of ["done", "plan"]) if (b[f]) { a[f] = a[f] || {}; for (const x in b[f]) a[f][x] = typeof b[f][x] === "number" ? Math.max(a[f][x] || 0, b[f][x]) : (a[f][x] || b[f][x]); }
+    }
   },
   async pull(){
     if (!this.cfg() || this.busy || !navigator.onLine) return;
@@ -1165,5 +1484,5 @@ async function boot(){
 }
 boot();
 // для проверки из консоли
-window.__zh = {S, C: () => C, P: () => P, Sync, genLesson, LESSON, ITEM, scoreHeard, loadHz};
+window.__zh = {S, C: () => C, P: () => P, Sync, genLesson, LESSON, ITEM, DLG, SND, SH, scoreHeard, loadHz, planDay, planSteps};
 })();

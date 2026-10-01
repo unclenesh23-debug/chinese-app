@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Китайский</title>
-<meta name="description" content="Китайский каждый день: уроки, тоны, повторение">
+<meta name="description" content="Китайский каждый день: уроки, слух, тоны, повторение">
 <meta name="theme-color" content="#F6F5F2" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#121413" media="(prefers-color-scheme: dark)">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -15,7 +15,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/icon-180.png">
 <link rel="icon" type="image/png" href="icons/icon-192.png">
-<link rel="stylesheet" href="app.css?v=0b2e5058cb">
+<link rel="stylesheet" href="app.css?v=af2059286c">
 </head>
 <body>
 <div id="app">
@@ -24,14 +24,15 @@
   <nav class="tabs" id="tabs" aria-label="Разделы">
     <button data-tab="learn" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5V6a2 2 0 0 1 2-2h13v13H6.5A2.5 2.5 0 0 0 4 19.5zm0 0A2.5 2.5 0 0 0 6.5 22H19v-5"/></svg><span>Учиться</span></button>
     <button data-tab="review"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg><span>Повторить</span><b class="badge" id="dueBadge" hidden></b></button>
-    <button data-tab="tones"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h4l4 10h4l4-10h2" /></svg><span>Тоны</span></button>
+    <button data-tab="tones"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h4l4 10h4l4-10h2" /></svg><span>Слух</span></button>
     <button data-tab="me"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg><span>Я</span></button>
   </nav>
 </div>
 <section id="lesson" class="lesson" hidden aria-live="polite"></section>
+<section id="shadow" class="lesson shadow" hidden aria-live="polite"></section>
 <div id="sheet" class="sheet-wrap" hidden></div>
 <div id="toast" class="toast" role="status" hidden></div>
 <noscript>Нужен JavaScript.</noscript>
-<script src="app.js?v=0b2e5058cb"></script>
+<script src="app.js?v=af2059286c"></script>
 </body>
 </html>
