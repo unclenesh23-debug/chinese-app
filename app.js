@@ -2,11 +2,14 @@
 (() => {
 "use strict";
 /* ===== core: константы, мелочи, пиньинь, журнал (IndexedDB), повторение (ТЗ 4.4), план дня (ТЗ 2.2) ===== */
-const VERSION = "152342241e";
+const VERSION = "de78ceddd2";
 /* Громкость речи после записи голоса — ОДНА константа (проба 2 на iPhone хозяина, 02.11: победил gain2):
    "gain2" — после первой записи (и 10 минут после неё, даже после перезапуска страницы) речь через Web Audio ×2 с ограничителем;
    "mr"    — запись через MediaRecorder без AudioContext, пауза 2,5 с, после записи — новый плеер;
-   "none"  — ничего особого.
+   "none"  — ничего особого;
+   "gain2k" — как gain2, но пока речь звучит через Web Audio, рядом по кругу играет беззвучный <audio>: iPhone считает страницу
+             воспроизведением, и беззвучный переключатель не глушит Web Audio (догадка, не проверено). Готов, НЕ включён:
+             ведущий включит, если в проверке 41 хозяин скажет «в беззвучном молчит».
    Режим звука iPhone: перед каждой записью "play-and-record", после — "auto"; "playback" не ставим никогда (ломал следующие записи). */
 const AFTER_REC = "gain2";
 const MIN = 60000, DAY_MS = 86400000;
@@ -165,6 +168,19 @@ const DB = {
   count(key) {
     if (DB.mem) return Promise.resolve(DB.mem.log.length - key);
     return new Promise(ok => { const r = DB.db.transaction("log").objectStore("log").count(IDBKeyRange.lowerBound(key, true)); r.onsuccess = () => ok(r.result); r.onerror = () => ok(0); });
+  },
+  lastKey() {
+    if (DB.mem) return Promise.resolve(DB.mem.log.length);
+    return new Promise(ok => { try { const r = DB.db.transaction("log").objectStore("log").openCursor(null, "prev"); r.onsuccess = () => ok(r.result ? r.result.key : 0); r.onerror = () => ok(0); } catch (e) { ok(0); } });
+  },
+  putAt(ev, key, kv) { // событие с заданным номером (после «Вернуть прогресс» счётчик событий идёт дальше прежнего) + снимки, одной транзакцией
+    if (DB.mem) return DB.commit([ev], kv);
+    return new Promise((ok, bad) => {
+      const tx = DB.db.transaction(["log", "kv"], "readwrite"), ks = tx.objectStore("kv");
+      tx.objectStore("log").put(ev, key);
+      for (const k in kv) { if (kv[k] == null) ks.delete(k); else ks.put(kv[k], k); }
+      tx.oncomplete = () => ok([key]); tx.onerror = tx.onabort = () => bad(tx.error);
+    });
   }
 };
 
@@ -176,15 +192,18 @@ function freshState() {
 }
 function wrec(id) { return ST.w[id] || (ST.w[id] = { lv: -1, due: 0, f: 0, hn: 0, sn: 0, tn: 0, tr: 0, tx: 0, x: 0 }); }
 /* Применить событие журнала к состоянию. Чистая функция от событий: состояние всегда можно пересчитать из журнала. */
+const dayRec = d => ST.days[d] || (ST.days[d] = { a: 0, r: 0 });
 function apply(e) {
+  if (e.cp) return; // копия своего события после «Вернуть прогресс» (круг 1, №2): уже в base, едет только для Claude
   const d = e.d != null ? e.d : dayNum(e.t);
-  if (e.k === "n") { const w = wrec(e.w); if (w.lv < 0) { w.lv = 0; w.due = d + 1; w.f = d; } return; }
+  if (e.k === "n") { const w = wrec(e.w); if (w.lv < 0) { w.lv = 0; w.due = d + 1; w.f = d; const dd = dayRec(d); dd.nw = (dd.nw || 0) + 1; } return; } // nw — новых за день
   if (e.k === "q") { ST.shown[e.w] = d; return; }
   if (e.k === "C") { ST.checked[e.l] = [e.n, e.of, d]; return; }
-  if (e.k === "D") { const dd = ST.days[e.d] || (ST.days[e.d] = { a: 0, r: 0 }); if (!dd.done) dd.done = e.min || 1; return; }
+  if (e.k === "D") { const dd = dayRec(e.d); if (!dd.done) { dd.done = e.min || 1; if (e.sv) dd.sv = 1; } else if (!e.sv && dd.sv) { dd.done = e.min || dd.done; delete dd.sv; } return; } // sv — «Спасти день», своей пометкой; D без sv после него — день засчитан полным занятием (круг 1, №8)
+  if (e.k === "F") { if (!e.stale) { const dd = dayRec(d); dd.ses = (dd.ses || 0) + 1; } return; }                  // ses — законченных занятий за день
   if (e.k !== "a") return;
-  const day = ST.days[d] || (ST.days[d] = { a: 0, r: 0 });
-  day.a++; if (e.r === 2) day.r++;
+  const day = dayRec(d);
+  day.a++; if (e.r === 2) day.r++; if (e.p === "review") day.rv = (day.rv || 0) + 1;
   if (!W(e.w)) return; // слово сняли в новой версии — ответ в журнале остаётся
   if (e.ns) return; // ответ «без звука» (звук урока сломан) — повторение не двигаем (методист, М1)
   const w = wrec(e.w);
@@ -204,9 +223,53 @@ function apply(e) {
     } else { w.lv = Math.max(before - 1, 0); w.due = d + STEPS[w.lv]; }        // «почти» — шаг назад
   }
 }
-function rebuild(events) { // состояние из журнала, если снимок потерян
+function rebuild(events, base) { // состояние из журнала, если снимок потерян; после «Вернуть прогресс» — от возвращённого снимка (kv base)
   const keep = ST; ST = Object.assign(freshState(), { dev: keep.dev, born: keep.born, lesson: keep.lesson, set: keep.set, copy: keep.copy });
-  for (const x of events) apply(x.v);
+  if (base) snapInto(base, true);
+  for (const x of events) if (!base || x.k > base.n) apply(x.v);
+}
+/* ---------- снимок для «Вернуть прогресс» (1.8, вариант «а»): сроки слов по навыкам, дни (серия, засчитанные), урок на парах,
+   номер устройства, счётчик событий. Список полей закрытый: настройки и поля «О себе» (фаза 2) сюда не попадают никогда.
+   Правила повторения — только здесь, в приложении: Python снимок не пересчитывает, только хранит и отдаёт кодом. ---------- */
+function snapState(n) {
+  const b = dayNum(), w = [], days = [], ck = {}, sh = {};
+  for (const id in ST.w) { const x = ST.w[id]; w.push([id, x.lv, x.due - b, x.f - b, x.hn, x.sn, x.tn, x.tr, x.tx, x.x, (x.hl ? 1 : 0) | (x.sl ? 2 : 0) | (x.ck ? 4 : 0)]); }
+  for (const k in ST.days) { const x = ST.days[k]; days.push([k - b, x.a || 0, x.r || 0, x.done || 0, x.sv || 0, x.ses || 0, x.nw || 0, x.rv || 0]); }
+  for (const l in ST.checked) { const c = ST.checked[l]; ck[l] = [c[0], c[1], c[2] - b]; }
+  for (const id in ST.shown) sh[id] = ST.shown[id] - b;
+  return { v: 1, dev: ST.dev, n, t: Date.now(), b, born: ST.born, lesson: ST.lesson, w, days, ck, sh };
+}
+function snapInto(s, replace) { // вернуть снимок: значения берём, а не складываем — повторная вставка того же кода ничего не удваивает
+  const b = s.b, act = x => x ? (x.hn || 0) + (x.sn || 0) + (x.tn || 0) + (x.x || 0) : -1;
+  for (const r of s.w || []) {
+    const x = { lv: r[1], due: r[2] + b, f: r[3] + b, hn: r[4], sn: r[5], tn: r[6], tr: r[7], tx: r[8], x: r[9] };
+    if (r[10] & 1) x.hl = 1; if (r[10] & 2) x.sl = 1; if (r[10] & 4) x.ck = 1;
+    if (replace || act(ST.w[r[0]]) <= act(x)) ST.w[r[0]] = x;
+  }
+  for (const r of s.days || []) {
+    const k = r[0] + b, o = ST.days[k] || {}, x = { a: Math.max(o.a || 0, r[1]), r: Math.max(o.r || 0, r[2]) };
+    if (o.done || r[3]) x.done = o.done || r[3];
+    if (o.done ? o.sv : r[4]) x.sv = 1;
+    ["ses", "nw", "rv"].forEach((f, i) => { const v = Math.max(o[f] || 0, r[5 + i] || 0); if (v) x[f] = v; });
+    ST.days[k] = x;
+  }
+  for (const l in s.ck || {}) if (replace || !ST.checked[l]) ST.checked[l] = [s.ck[l][0], s.ck[l][1], s.ck[l][2] + b];
+  for (const id in s.sh || {}) if (replace || !(id in ST.shown)) ST.shown[id] = s.sh[id] + b;
+  if (s.lesson && (replace || !ST.lesson)) ST.lesson = s.lesson;
+  if (s.dev) ST.dev = s.dev;
+  if (s.born) ST.born = Math.min(ST.born || s.born, s.born);
+}
+const b64enc = u8 => { let s = ""; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
+const b64dec = t => Uint8Array.from(atob(t), c => c.charCodeAt(0));
+async function zipText(s) { // deflate-raw — то же, что zlib с wbits=-15 в progress.py; нет CompressionStream — без сжатия (zf: json)
+  const u8 = new TextEncoder().encode(s);
+  try { if (window.CompressionStream) return { zf: "deflate-raw", z: b64enc(new Uint8Array(await new Response(new Blob([u8]).stream().pipeThrough(new CompressionStream("deflate-raw"))).arrayBuffer())) }; } catch (e) {}
+  return { zf: "json", z: b64enc(u8) };
+}
+async function unzipText(z, zf) {
+  const u8 = b64dec(z);
+  if (zf === "json") return new TextDecoder().decode(u8);
+  return await new Response(new Blob([u8]).stream().pipeThrough(new DecompressionStream("deflate-raw"))).text();
 }
 const learned = id => { const w = ST.w[id]; return !!(w && w.hl && w.sl); };
 const known = id => { const w = ST.w[id]; return !!(w && (w.lv >= 1 || w.hn + w.sn > 0)); };
@@ -245,18 +308,32 @@ function readyOf(lid) { const act = lessonWords(lid).filter(isActive); return { 
 const checkPool = lid => lessonWords(lid).filter(id => W(id).k !== "q" && !W(id).c && hasClip(id) && isNew(id));
 const needCheck = lid => !!lid && !ST.checked[lid] && checkPool(lid).length >= 4;
 
+function newLesson(L) { // новые слова — из урока на парах; его пакет битый (3б) — из соседнего: следующий, потом предыдущий
+  if (!L || !lessonBroken(L)) return L;
+  const cur = lessonOf(L), ls = cur ? bookLessons(cur.book) : [], i = ls.findIndex(l => l.id === L);
+  for (const j of [i + 1, i - 1, i + 2, i - 2]) { const l = ls[j]; if (l && !lessonBroken(l.id) && unknownActive(l.id).length) return l.id; }
+  return L;
+}
 function newLimit(due) {
   let n = 5; const acc = recentAcc();
   if (acc != null && acc < 0.7) n = 3;
   if (due > REVIEW_MAX * 2) n = 0; else if (due > REVIEW_MAX * 1.5) n = 2;               // новые по долгу (ТЗ 4.4)
   return n;
 }
-function planDay() {
-  const d = dayNum(), L = curLesson(), due = dueList(d), chk = needCheck(L);
-  const parts = chk && due.length < 10 ? ["warmup", "check", "new", "tones", "recall"]
+/* Вид занятия (data-session): day — обычные 15 минут; more — «Ещё 15 минут» (ядро ещё раз); save — «Спасти день» (5 минут,
+   ≤ 15 повторений); soft — мягкий возврат после перерыва (10 минут, самое нужное из просроченного, новых 0–2). */
+function planDay(kind) {
+  kind = kind || "day";
+  const d = dayNum(), L = curLesson(), due = dueList(d), chk = kind === "day" && needCheck(L), dd = ST.days[d] || {};
+  let parts = chk && due.length < 10 ? ["warmup", "check", "new", "tones", "recall"]
     : chk ? ["warmup", "review", "check", "tones", "recall"] : ["warmup", "review", "new", "tones", "recall"];
-  const newN = parts.includes("new") ? Math.min(newLimit(due.length), unknownActive(L || "").length + (chk ? 99 : 0)) : 0;
-  return { d, L, parts, due: due.length, review: parts.includes("review") ? Math.min(REVIEW_MAX, due.length) : 0, newN, onlyReview: newLimit(due.length) === 0 };
+  if (kind === "more" || kind === "soft") parts = ["review", "new", "tones", "recall"]; // «Скажи по памяти» — последним
+  if (kind === "save") parts = ["review", "tones"];
+  const revCap = kind === "save" ? 15 : kind === "soft" ? 20 : REVIEW_MAX; // за 30 минут (день + ещё 15) — не больше 60
+  const dayCap = ((dd.ses || 0) + 1) * 15 >= 60 ? 15 : 10; // новых за день: к 30 минутам ≤ 10, с 60 минут ≤ 15 (проверка 32)
+  let newN = parts.includes("new") ? Math.min(newLimit(due.length), unknownActive(newLesson(L) || "").length + (chk ? 99 : 0), Math.max(0, dayCap - (dd.nw || 0))) : 0;
+  if (kind === "soft") newN = Math.min(newN, 2);
+  return { d, L, kind, parts, due: due.length, review: parts.includes("review") ? Math.min(revCap, due.length) : 0, revCap, newN, onlyReview: newLimit(due.length) === 0 };
 }
 
 /* ---------- вопросы ---------- */
@@ -296,7 +373,7 @@ function toneQ(id, p) {
 const toneable = id => { const w = W(id); if (!w || w.k === "q" || w.c || w.ph) return false; /* у слов «во фразе» звучит фраза — тон слова не спросить */ const t = tonesOf(w.py); return t.length >= 1 && t.length <= 2 && t.some(x => x) && !(t.length === 1 && !t[0]); };
 function hearQ(id, p) { const w = ST.w[id]; return toneable(id) && w && w.tn > 0 && w.tr / w.tn < 0.7 && Math.random() < 0.6 ? toneQ(id, p) : q48(id, p); }
 function buildPart(p, plan, sess) {
-  const d = plan.d, L = plan.L, out = [], canSay = !micOff() && !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+  const d = plan.d, L = plan.L, out = [], canSay = !micOff(); // без mediaDevices «Скажи» остаётся: касание микрофона → 4.13 blocked («открой с экрана Домой»)
   const used = new Set(); for (const pp of sess.parts) for (const q of pp.q || []) used.add(q.w);
   const ok = id => playable(id) && !(listenOff());
   if (p === "warmup") {
@@ -305,7 +382,7 @@ function buildPart(p, plan, sess) {
   } else if (p === "review") {
     let say = 0, load = 0; // «говорю» — три экрана (4.9 → 4.10 → 4.11) и ≈ 25 с: в потолке считаем за три
     for (const id of dueList(d)) {
-      if (load >= REVIEW_MAX) break;
+      if (load >= (plan.revCap || REVIEW_MAX)) break;
       if (used.has(id)) continue;
       const w = ST.w[id], act = isActive(id) && !W(id).c;
       if (ok(id)) { out.push(hearQ(id, p)); load++; } // «говорю» — только в «Скажи по памяти», последним блоком: меньше звука после записи (ТЗ 7.5)
@@ -316,18 +393,18 @@ function buildPart(p, plan, sess) {
     words.forEach(id => out.push(q48(id, p)));
     shuffle(words.filter(toneable)).slice(0, 5).forEach(id => out.push(toneQ(id, p)));
   } else if (p === "new") {
-    const fresh = unknownActive(L).filter(id => hasClip(id) && playable(id)).slice(0, plan.newN);
+    const NL = newLesson(L), fresh = unknownActive(NL).filter(id => hasClip(id) && playable(id)).slice(0, plan.newN);
     fresh.forEach(id => out.push({ x: "4.1", w: id, p }));
-    const passive = lessonWords(L).filter(id => W(id).k !== "a" && !(id in ST.shown) && hasClip(id) && playable(id) && (W(id).k !== "q" || W(id).ph || (W(id).ex && C.x[W(id).ex]))).slice(0, 2); // голая частица без фразы не показывается
+    const passive = lessonWords(NL).filter(id => W(id).k !== "a" && !(id in ST.shown) && hasClip(id) && playable(id) && (W(id).k !== "q" || W(id).ph || (W(id).ex && C.x[W(id).ex]))).slice(0, 2); // голая частица без фразы не показывается
     passive.forEach(id => out.push({ x: "4.2", w: id, p }));
     shuffle(fresh.slice()).forEach(id => out.push(q48(id, p)));
   } else if (p === "tones") {
     const seen = Object.keys(ST.w).filter(id => ST.w[id].lv >= 0 && toneable(id) && ok(id));
     let pool = seen.length >= 6 ? seen : seen.concat(lessonWords(L).filter(id => toneable(id) && ok(id) && !seen.includes(id)));
     pool = pool.map(id => [(ST.w[id] ? ST.w[id].tx * 2 : 0) + Math.random() * 3, id]).sort((a, b) => b[0] - a[0]).map(x => x[1]);
-    const n = Math.min(12, pool.length);
+    const n = Math.min(plan.kind === "save" ? 6 : plan.kind === "soft" ? 8 : 12, pool.length);
     const cur = lessonOf(L), passed = id => { const l = lessonOf(W(id).l); return !!(l && cur && l.book === cur.book && l.n <= cur.n); };
-    const pairs = shuffle(PAIRS.filter(([a, b]) => ok(a) && ok(b) && passed(a) && passed(b) && (ST.w[a] || ST.w[b]))).slice(0, 3); // только пройденные уроки (М2)
+    const pairs = shuffle(PAIRS.filter(([a, b]) => ok(a) && ok(b) && passed(a) && passed(b) && (ST.w[a] || ST.w[b]))).slice(0, plan.kind === "save" ? 0 : 3); // только пройденные уроки (М2)
     pairs.forEach(([a, b]) => { const w = Math.random() < 0.5 ? a : b; const o = shuffle([a, b]); out.push({ x: "4.4", w, p, o, c: o.indexOf(w) }); });
     pool.slice(0, Math.max(0, n - pairs.length)).forEach(id => out.push(toneQ(id, p)));
   } else if (p === "recall") {
@@ -337,7 +414,7 @@ function buildPart(p, plan, sess) {
         .sort((a, b) => (ST.w[a].sn - ST.w[b].sn) || (ST.w[a].due - ST.w[b].due));
       const pick = [];
       for (const id of due.concat(today)) { if (pick.length >= 5) break; if (!pick.includes(id)) pick.push(id); }
-      pick.slice(0, Math.max(3, Math.min(5, pick.length))).forEach(id => out.push({ x: "4.9", w: id, p }));
+      pick.slice(0, plan.kind === "soft" ? 3 : Math.max(3, Math.min(5, pick.length))).forEach(id => out.push({ x: "4.9", w: id, p }));
     }
   }
   return out;
@@ -353,6 +430,14 @@ function fetchT(url, ms, opts) {
 }
 const absUrl = u => new URL(u, location.href).href;
 const SND_FAILED = new Set();
+async function isMp3(b) { // в начале ID3 или кадр MPEG; иначе файл битый (страница ошибки, мусор с кодом 200)
+  try { const x = new Uint8Array(await b.slice(0, 3).arrayBuffer()); return x.length === 3 && ((x[0] === 0x49 && x[1] === 0x44 && x[2] === 0x33) || (x[0] === 0xFF && (x[1] & 0xE0) === 0xE0)); } catch (e) { return true; }
+}
+function lessonBroken(lid) { // битый пакет урока: не скачались или не mp3 треть его клипов (и не меньше 2) — урок недоступен до следующего запуска с сетью
+  if (!lid || !C) return false;
+  const u = Snd.lessonClips(lid); let bad = 0; for (const x of u) if (SND_FAILED.has(absUrl(x))) bad++;
+  return bad >= 2 && bad * 3 >= u.length;
+}
 async function fetch2(a, ms) { // клип: попытка и один повтор, дальше — «недоступен» до следующего запуска
   let r = null;
   try { r = await fetchT(a, ms); if (r.ok) return r; } catch (e) { if (navigator.onLine === false) throw e; }
@@ -389,6 +474,7 @@ const Snd = {
     try {
       const r = await fetch2(a, 9000); if (!r.ok) { sndFail(a, "HTTP " + r.status); return null; }
       const b = await r.blob();
+      if (!(await isMp3(b))) { sndFail(a, "не mp3"); return null; } // в память не кладём — со следующим запуском скачается заново
       try { const c = await caches.open(SND); await c.put(a, new Response(b, { headers: { "Content-Type": "audio/mpeg" } })); Snd.have.add(a); } catch (e) {}
       return b;
     } catch (e) { return null; } // обрыв или таймаут — не «сломан»: попробуем, когда слово встретится снова
@@ -420,7 +506,7 @@ const Snd = {
         while (i < todo.length) {
           if (navigator.onLine === false) return;
           const u = todo[i++];
-          try { const r = await fetch2(absUrl(u), 15000); if (r.ok) { await c.put(absUrl(u), new Response(await r.blob(), { headers: { "Content-Type": "audio/mpeg" } })); Snd.have.add(absUrl(u)); } else sndFail(u, "HTTP " + r.status); } catch (e) {} // обрыв связи — не помечаем
+          try { const r = await fetch2(absUrl(u), 15000); if (r.ok) { const b = await r.blob(); if (await isMp3(b)) { await c.put(absUrl(u), new Response(b, { headers: { "Content-Type": "audio/mpeg" } })); Snd.have.add(absUrl(u)); } else sndFail(u, "не mp3"); } else sndFail(u, "HTTP " + r.status); } catch (e) {} // обрыв связи — не помечаем
           Snd.prog.n++; if (onStep) onStep(Snd.prog);
         }
       };
@@ -456,7 +542,17 @@ function makeWav(pcm, rate) {
 const AC = () => window.AudioContext || window.webkitAudioContext;
 function setSession(t) { try { if (navigator.audioSession) navigator.audioSession.type = t; } catch (e) {} }
 const Player = {
-  el: null, ctx: null, tok: 0, btn: null, recDone: false, waitUntil: 0, silent: null, cur: null,
+  el: null, ctx: null, tok: 0, btn: null, recDone: false, waitUntil: 0, silent: null, cur: null, keep: null, keepN: 0,
+  keepOn() { // gain2k: беззвучный <audio> по кругу, пока речь звучит через Web Audio (iPhone: «воспроизведение», не «фон») — догадка, не проверено
+    Player.keepN++;
+    try {
+      if (!Player.silent) Player.silent = URL.createObjectURL(makeWav(new Float32Array(1600), 16000));
+      const k = Player.keep || (Player.keep = new Audio());
+      k.setAttribute("playsinline", ""); k.loop = true; if (k.src !== Player.silent) k.src = Player.silent;
+      const p = k.play(); if (p && p.catch) p.catch(() => {});
+    } catch (e) {}
+  },
+  keepOff() { if (--Player.keepN > 0) return; Player.keepN = 0; try { if (Player.keep) Player.keep.pause(); } catch (e) {} },
   unlock() { // только из касания «Начать»: один <audio> и AudioContext для «дзынь»
     const el = Player.el || (Player.el = $("#aud"));
     try {
@@ -485,18 +581,18 @@ const Player = {
     Player.stop();
     const tok = Player.tok, btn = opts.btn || null;
     Player.btn = btn; Player.mark(btn, "playing");
-    const useWA = AFTER_REC === "gain2" && Player.recDone;
+    const useWA = (AFTER_REC === "gain2" || AFTER_REC === "gain2k") && Player.recDone;
     let ctx = null;
     const prep = { dest: null, el2: null, err: null, fresh: null }; // плеер запускаем прямо в касании, звук подставим потом (как в пробе 2)
     if (useWA) {
       try {
-        const A = AC(); ctx = new A(); const r = ctx.resume(); if (r && r.catch) r.catch(() => {});
+        const A = AC(); ctx = new A(); const r = ctx.resume(); if (r && r.catch) r.catch(() => {}); if (AFTER_REC === "gain2k") Player.keepOn();
       } catch (e) { ctx = null; }
     }
     if (AFTER_REC === "mr" && Player.recDone && !ctx) {
       try { prep.fresh = new Audio(); prep.fresh.setAttribute("playsinline", ""); if (Player.silent) { prep.fresh.src = Player.silent; const pp = prep.fresh.play(); if (pp && pp.catch) pp.catch(() => {}); } } catch (e) { prep.fresh = null; }
     }
-    const fin = res => { if (tok === Player.tok) { Player.mark(btn, res === "missing" ? "missing" : "idle"); Player.btn = null; Player.cur = null; } if (ctx) { try { ctx.close(); } catch (e) {} } return res; };
+    const fin = res => { if (tok === Player.tok) { Player.mark(btn, res === "missing" ? "missing" : "idle"); Player.btn = null; Player.cur = null; } if (ctx) { try { ctx.close(); } catch (e) {} Player.keepOff(); } return res; };
     return (async () => {
       if (!url) return fin("missing");
       const u = opts.raw ? url : await Snd.obj(url);
@@ -504,7 +600,7 @@ const Player = {
       if (!u) return fin("missing");
       const wait = Player.waitUntil - Date.now(); if (wait > 0) await sleep(wait);
       if (tok !== Player.tok) return fin("stop");
-      if (ctx) return fin(await Player.playWA(ctx, u, AFTER_REC === "gain2" ? 2 : 1, prep, tok));
+      if (ctx) return fin(await Player.playWA(ctx, u, 2, prep, tok));
       const el = prep.fresh || Player.el || (Player.el = $("#aud"));
       const res = await Player.playEl(el, u, opts.slow ? 0.7 : 1, tok);
       if (res === "bad" && !opts.raw) { sndFail(url, "файл не играет"); Snd.forget(url); return fin("missing"); }
@@ -576,7 +672,8 @@ const Mic = {
   async record(maxMs, onLevel) {
     const diag = Mic.diag = { name: "", ctx0: "", ctx: "", sess: "", n: 0, chunks: 0, wl: "", rate: 0, peak: null }; // код для снимка экрана и журнала
     const sessNow = () => { try { return navigator.audioSession ? navigator.audioSession.type + (navigator.audioSession.state ? "/" + navigator.audioSession.state : "") : "нет"; } catch (e) { return "?"; } };
-    if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) { diag.name = "нет mediaDevices"; throw { reason: "no-mic", err: "нет mediaDevices" }; }
+    if (inApp()) { diag.name = "встроенный браузер"; throw { reason: "blocked", err: "WeChat / Telegram" }; } // там микрофона нет — «открой с экрана Домой»
+    if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) { diag.name = "нет mediaDevices"; throw { reason: "blocked", err: "нет mediaDevices" }; }
     Player.stop();
     try { if (Player.ctx && Player.ctx.state === "running") Player.ctx.suspend().catch(() => {}); } catch (e) {} // «дзынь» на время записи — молчит
     const t0 = performance.now(), cons = { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } };
@@ -585,7 +682,7 @@ const Mic = {
     const stopper = new Promise(r => { Mic.stopNow = r; });
     Mic.recording = true;
     try {
-      if (AFTER_REC !== "mr") { const A = AC(); if (!A) throw { reason: "no-mic", err: "нет AudioContext" }; ctx = new A(); diag.ctx0 = ctx.state; try { ctx.resume().catch(() => {}); } catch (e) {} }
+      if (AFTER_REC !== "mr") { const A = AC(); if (A) { ctx = new A(); diag.ctx0 = ctx.state; try { ctx.resume().catch(() => {}); } catch (e) {} } } // нет Web Audio — сначала всё равно спросим микрофон: причина отказа важнее
       const gum = () => { const g = navigator.mediaDevices.getUserMedia(cons); return Promise.race([g, sleep(30000).then(() => { g.then(s => s.getTracks().forEach(t => t.stop()), () => {}); throw Object.assign(new Error("нет ответа 30 с"), { name: "AbortError" }); })]); }; // разрешение пришло поздно — дорожки сразу стоп
       try { stream = await gum(); }
       catch (e0) {
@@ -594,9 +691,10 @@ const Mic = {
           diag.retry = 1; setSession("play-and-record"); await sleep(300);
           try { stream = await gum(); e = null; } catch (e1) { e = e1; }
         }
-        if (e) { const n = e && e.name; diag.name = n || errText(e); diag.sess = sessNow(); throw { reason: n === "NotAllowedError" || n === "SecurityError" ? "denied" : n === "InvalidStateError" ? "busy" : "no-mic", err: errText(e) }; }
+        if (e) { const n = e && e.name; diag.name = n || errText(e); diag.sess = sessNow(); throw { reason: n === "NotAllowedError" || n === "SecurityError" ? "denied" : n === "InvalidStateError" ? "stuck" : n === "NotReadableError" ? "busy" : "no-mic", err: errText(e) }; } // stuck — режим звука застрял и после повтора; busy — занят звонком или диктофоном
       }
       diag.sess = sessNow();
+      if (AFTER_REC !== "mr" && !ctx) throw { reason: "no-mic", err: "нет AudioContext" };
       if (AFTER_REC === "mr") {
         if (!window.MediaRecorder) throw { reason: "no-mic", err: "нет MediaRecorder" };
         mr = new MediaRecorder(stream); const stopped = new Promise(r => { mr.onstop = r; });
@@ -632,7 +730,7 @@ const Mic = {
         try { src.disconnect(); node.disconnect(); } catch (e) {}
       }
     } finally {
-      Mic.recording = false; Mic.stopNow = null;
+      Mic.recording = false; Mic.stopNow = null; Mic.endAt = performance.now(); // от этой точки — «ответ ≤ 1 с» (data-took на 4.11 / 4.13)
       try { stream && stream.getTracks().forEach(t => t.stop()); } catch (e) {}
       try { ctx && ctx.close(); } catch (e) {}
       try { if (Player.ctx && Player.ctx.state === "suspended") Player.ctx.resume().catch(() => {}); } catch (e) {}
@@ -652,12 +750,43 @@ const Mic = {
     }
     diag.n = pcm.length; diag.chunks = chunks.length || levels.length; diag.peak = Math.round(peak * 1000) / 1000;
     if (!mr && !chunks.length) throw { reason: "silent", err: "0 отсчётов: микрофон не дал звук (AudioContext " + diag.ctx + ")" };
-    const voiced = levels.filter(r => r > 0.006).length; // ≈ −45 дБ
     const ms = Math.round(performance.now() - t0);
-    if (peak < 0.015 || voiced < 3) throw { reason: "silent", err: "пик " + peak.toFixed(3) + ", голос " + voiced + " кусков" };
-    return { pcm, rate, peak, voiced, ms };
+    const v = await micVerdict(pcm, rate, levels, peak); // разбор кусками с передышками: ответ ≤ 1 с и при замедлении ×4
+    diag.lvl = v.code;
+    if (v.reason) throw { reason: v.reason, err: v.code, rec: v.reason === "unsure" ? { pcm, rate } : null, top: v.top };
+    return { pcm, rate, peak, voiced: v.voiced, ms, me: v.me };
   }
 };
+/* Беда микрофона по самой записи (4.13). Куски ≈ 50 мс; первые 100 мс (щелчок включения) не считаются; голос — кусок громче −44 дБ.
+   silent — почти ноль; loud — отсчёты у края внутри голоса не короче 150 мс подряд (одиночный щелчок или писк — не «громко»);
+   noise — шум высокий всё время (10-й процентиль), голос над ним не поднялся вдвое; quiet — голос есть, но тихо;
+   short — от первого до последнего куска голоса меньше 300 мс; unsure — линия тона не построилась (меньше 6 звонких кадров).
+   Пороги сверены 03.11 на WAV тестировщика (tests/_work/wav) и встроенном писке Chrome (10 мс, полный размах, раз в 0,5 с — это «норма»). */
+const MIC_LIM = { skipMs: 100, voice: 0.006, silentPeak: 0.004, edge: 0.985, clipMin: 30, clipFrac: 0.005, runMin: 3, noiseFloor: 0.02, noiseOver: 2, quietTop: 0.02, shortMs: 300, pitched: 6 };
+async function micVerdict(pcm, rate, levels, peak) {
+  const L = MIC_LIM, nl = levels.length, cs = nl ? Math.max(1, Math.round(pcm.length / nl)) : 2400, per = cs / rate;
+  const s0 = Math.min(nl, Math.round(L.skipMs / 1000 / per)), lv = levels.slice(s0), srt = lv.slice().sort((a, b) => a - b);
+  const floor = srt.length ? srt[Math.floor(srt.length * 0.1)] : 0, top = srt.length ? srt[srt.length - 1] : 0;
+  const on = lv.map(r => r > L.voice), first = on.indexOf(true), lastV = on.lastIndexOf(true);
+  const spanMs = first < 0 ? 0 : Math.round((lastV - first + 1) * per * 1000);
+  let clip = 0, inRun = 0, maxRun = 0;
+  for (let i = 0; i < lv.length;) {
+    if (!on[i]) { i++; continue; }
+    let j = i; while (j < lv.length && on[j]) j++; if (j - i > maxRun) maxRun = j - i;
+    if (j - i >= L.runMin) { inRun += (j - i) * cs; for (let k = (s0 + i) * cs, e = Math.min(pcm.length, (s0 + j) * cs); k < e; k++) { const a = pcm[k]; if (a >= L.edge || a <= -L.edge) clip++; } }
+    i = j;
+  }
+  const code = "пик " + peak.toFixed(3) + " · громкость " + top.toFixed(3) + " · шум " + floor.toFixed(3) + " · голос " + spanMs + " мс · у края " + clip;
+  const res = (reason, extra) => Object.assign({ reason, code, top, voiced: on.filter(Boolean).length }, extra || {});
+  if (peak < L.silentPeak || first < 0) return res("silent");
+  if (clip >= Math.max(L.clipMin, inRun * L.clipFrac)) return res("loud");
+  if (floor > L.noiseFloor && top < floor * L.noiseOver) return res("noise");
+  if (top < L.quietTop) return res("quiet");
+  if (spanMs < L.shortMs) return res("short");
+  const fr = await pitchTrack(pcm, rate), pitched = fr.filter(x => x != null).length;
+  if (pitched < L.pitched && maxRun >= L.runMin) return res("unsure"); // писк или щелчки без голоса ≥ 150 мс подряд — не «не уверен», а график
+  return res(null, { me: contour(fr) });
+}
 function decodeTo(ab) {
   const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
   const oc = new OAC(1, 16000, 16000);
@@ -666,16 +795,17 @@ function decodeTo(ab) {
 }
 
 /* ---------- высота голоса (YIN) и график ---------- */
-function pitchTrack(data, sr) {
+async function pitchTrack(data, sr) { // кадры кусками по 30 с передышкой — без долгих задач (ответ ≤ 1 с и при замедлении ×4)
   if (!data || !data.length) return [];
   const k = Math.max(1, Math.round(sr / 16000)), fs = sr / k, n = Math.floor(data.length / k);
   const x = new Float32Array(n); for (let i = 0; i < n; i++) { let t = 0; for (let j = 0; j < k; j++) t += data[i * k + j]; x[i] = t / k; }
   const Wn = Math.round(fs * 0.032), hop = Math.round(fs * 0.01), tMin = Math.floor(fs / 500), tMax = Math.ceil(fs / 65);
   const rms = []; let maxR = 0;
   for (let st = 0; st + Wn + tMax < n; st += hop) { let e = 0; for (let i = 0; i < Wn; i++) e += x[st + i] * x[st + i]; const r = Math.sqrt(e / Wn); rms.push(r); if (r > maxR) maxR = r; }
-  const d = new Float32Array(tMax + 2), out = [];
+  const d = new Float32Array(tMax + 2), out = []; let used = 0;
   for (let f = 0, st = 0; f < rms.length; f++, st += hop) {
-    if (rms[f] < maxR * 0.12) { out.push(null); continue; }
+    if (f % 30 === 29) await new Promise(r => setTimeout(r, 0));
+    if (rms[f] < maxR * 0.12 || ++used > 160) { out.push(null); continue; } // не больше 1,6 с голоса: слово короче, а ответ ≤ 1 с и при ×4
     let run = 0; d[0] = 1;
     for (let tau = 1; tau <= tMax; tau++) { let t = 0; for (let i = 0; i < Wn; i++) { const v = x[st + i] - x[st + i + tau]; t += v * v; } run += t; d[tau] = run ? t * tau / run : 1; }
     let tau = -1;
@@ -702,7 +832,7 @@ const REF = new Map();
 async function refContour(url) {
   if (REF.has(url)) return REF.get(url);
   let c = null;
-  try { const b = await Snd.blob(url); if (b) { const d = await decodeTo(await b.arrayBuffer()); c = contour(pitchTrack(d.data, d.sr)); } } catch (e) {}
+  try { const b = await Snd.blob(url); if (b) { const d = await decodeTo(await b.arrayBuffer()); c = contour(await pitchTrack(d.data, d.sr)); } } catch (e) {}
   REF.set(url, c); return c;
 }
 function graphSVG(ref, me, syl) {
@@ -813,7 +943,7 @@ function lessonGrid(onPick, inSheet) {
   const bid = UI.book || (cur && lessonOf(cur) ? lessonOf(cur).book : books[0].id);
   const kids = [];
   if (books.length >= 2) kids.push(h("div", { class: "books" }, books.map(b => h("button", { type: "button", class: "btn", test: "book", "data-book": b.id, "aria-pressed": b.id === bid ? "true" : "false", text: b.short || b.title, onclick: () => { UI.book = b.id; onPick(null); } }))));
-  kids.push(h("div", { class: "lgrid" }, bookLessons(bid).map(l => h("button", { type: "button", class: "btn", test: "lesson", "data-lesson": l.n, "data-book": l.book, "data-state": l.id === cur ? "on" : "off", "aria-label": "Урок " + l.n, text: String(l.n), onclick: () => onPick({ id: l.id }) }))));
+  kids.push(h("div", { class: "lgrid" }, bookLessons(bid).map(l => h("button", { type: "button", class: "btn", test: "lesson", "data-lesson": l.n, "data-book": l.book, "data-state": lessonBroken(l.id) ? "broken" : l.id === cur ? "on" : "off", "aria-label": "Урок " + l.n, text: String(l.n), onclick: () => onPick({ id: l.id }) }))));
   kids.push(h("button", { type: "button", class: "btn sec", test: "lesson-other", text: "Урок не из 1上 или дальше 15", onclick: () => onPick({ other: true }) }));
   kids.push(h("button", { type: "button", class: inSheet ? "btn sec" : "btn main", test: "catchup", text: "Не знаю — догоняю 1上", onclick: () => onPick({ catchup: true }) }));
   return kids;
@@ -827,7 +957,8 @@ function showFirst() {
   mount(h("section", { class: "scr", "data-screen": "1.6" }, h("div", { class: "body" },
     h("h1", { text: "Какой урок сейчас на парах?" }),
     h("p", { class: "line", text: "Новое каждый день — из этого урока. Одно касание — и начинаем." }),
-    h("div", { style: "display:grid;gap:12px" }, lessonGrid(pick, false)))));
+    h("div", { style: "display:grid;gap:12px" }, lessonGrid(pick, false),
+      h("button", { type: "button", class: "btn link", test: "restore", text: "Уже занимался? Вернуть прогресс", onclick: () => showRestore("first") })))));
 }
 function lessonSheet() {
   const close = () => closeOv("[data-overlay='2.6']");
@@ -867,8 +998,8 @@ function renderToday() {
   UI.tab = "today"; UI.sub = null; UI.inSession = false;
   closeStale();
   if (lessonMode() === "none") return showFirst();
-  const d = dayNum(), mode = lessonMode(), plan = planDay(), L = plan.L;
-  const scr = SESS ? "2.2" : dayDone(d) ? "2.3" : mode === "other" ? "2.7" : "2.1";
+  const d = dayNum(), mode = lessonMode(), away = awayDays(d), plan = planDay(away >= 3 ? "soft" : "day"), L = plan.L;
+  const scr = SESS ? "2.2" : dayDone(d) ? "2.3" : away >= 3 ? "2.4" : mode === "other" ? "2.7" : "2.1";
   const body = h("div", { class: "body" });
   const st = streak();
   body.append(h("div", { class: "top" }, h("div", {}, h("h1", { text: "Сегодня" }), h("div", { class: "date", text: dateLine() })),
@@ -888,7 +1019,10 @@ function renderToday() {
     const k = lessonNum(catchupLesson());
     body.append(h("div", { class: "prog", test: "catchup-line", "data-lesson": k, "data-of": ls.length }, h("span", { text: (scr === "2.7" ? "Пока догоняю 1上 · урок " : "Догоняю 1上 · урок ") + k + " из " + ls.length }), bar(k - 1, ls.length)));
   }
-  const due = dueList(d).length - (scr === "2.3" ? 0 : plan.review);
+  if (L && scr !== "2.3" && lessonBroken(L)) body.append(h("p", { class: "line", test: "lesson-broken", "data-lesson": lessonNum(L), text: "Урок " + lessonNum(L) + " не скачался целиком — новые слова возьму из соседнего. Скачаю заново при следующем запуске с сетью." }));
+  const ask = scr === "2.1" && mode === "lesson" ? lessonAsk(L, d) : null;
+  if (ask) body.append(ask);
+  const due = scr === "2.4" ? 0 : dueList(d).length - (scr === "2.3" ? 0 : plan.review); // 2.4 — без цифр долга
   let card;
   if (scr === "2.2") {
     const left = Math.max(1, Math.round(sessLeftMs() / MIN));
@@ -897,28 +1031,54 @@ function renderToday() {
       h("button", { type: "button", class: "btn main", test: "continue", "data-min": left, text: "Продолжить с места · ≈ " + left + " мин", onclick: resumeDay }));
   } else if (scr === "2.3") {
     const last = ST.last && ST.last.d === d ? ST.last : null, min = (ST.days[d] && ST.days[d].done) || 15;
-    card = h("div", { class: "card" }, h("div", { class: "done-big", test: "day-done", "data-min": min }, h("span", { class: "seal", text: "✓" }), "День засчитан · " + min + " мин"),
+    const sv = ST.days[d] && ST.days[d].sv;
+    card = h("div", { class: "card" }, h("div", { class: "done-big", test: "day-done", "data-min": min }, h("span", { class: "seal", text: "✓" }), (sv ? "Серия сохранена · " : "День засчитан · ") + min + " мин"),
       last && last.wrong && last.wrong.length ? h("p", { class: "line", text: "Завтра вернутся: " + last.wrong.map(id => W(id) ? W(id).hz : "").join(", ") }) : null,
-      h("p", { class: "line", text: "Завтра — новое занятие на 15 минут." }),
+      h("p", { class: "line", text: "Ещё 15 минут: повторение, новые слова, тоны на слух и «Скажи по памяти»." }),
+      h("button", { type: "button", class: "btn main", test: "more", "data-min": 15, text: "Ещё 15 минут", onclick: () => beginDay("more") }),
       copyBtn("btn sec"));
   } else {
     if (scr === "2.7") body.append(h("div", { class: "card", test: "photo-hint" }, h("h2", { text: "Твоего урока пока нет" }),
       h("ol", { class: "steps" }, h("li", { text: "Сфотографируй страницу 生词 своего урока." }), h("li", { text: "Отправь фото в чат «Китайский» в приложении Claude." }), h("li", { text: "Claude добавит урок за день — он появится здесь." })),
       h("p", { class: "line", text: "Пока занимаемся повторением, тонами и догоняем 1上." })));
-    card = h("div", { class: "card" }, h("h2", { text: "Занятие на 15 минут" }), h("ul", { class: "plan" }, planLines(plan).map(t => h("li", { text: t }))),
-      h("button", { type: "button", class: "btn main", test: "start", "data-min": 15, text: "Начать · 15 минут", onclick: beginDay }));
+    card = scr === "2.4"
+      ? h("div", { class: "card" }, h("h2", { text: "С возвращением!" }),
+        h("p", { class: "line", test: "away", "data-days": away, text: "Не было " + away + " " + plural(away, "день", "дня", "дней") + " — ничего страшного. Начнём мягко: 10 минут, только самое нужное." }),
+        h("button", { type: "button", class: "btn main", test: "start", "data-min": 10, text: "Начать · 10 минут", onclick: () => beginDay("soft") }))
+      : h("div", { class: "card" }, h("h2", { text: "Занятие на 15 минут" }), h("ul", { class: "plan" }, planLines(plan).map(t => h("li", { text: t }))),
+        h("button", { type: "button", class: "btn main", test: "start", "data-min": 15, text: "Начать · 15 минут", onclick: () => beginDay("day") }));
   }
   body.append(card);
+  if (scr === "2.1" || scr === "2.7") body.append(h("button", { type: "button", class: "row", test: "save-day", "data-min": 5, onclick: () => beginDay("save") }, h("span", { text: "Нет времени? 5 минут, чтобы не рвать серию" }), h("span", { class: "chev", text: "›" })));
   if (due > 0) body.append(h("p", { class: "line", test: "due", "data-n": due, text: (scr === "2.3" ? "Ждут повторения: " : "И ещё ") + due + " " + plural(due, "слово", "слова", "слов") + (scr === "2.3" ? " — завтра." : " ждут повторения — возьмём завтра.") }));
   const ps = L ? Snd.state(L) : null;
   if (ps && ps.n < ps.of) body.append(h("p", { class: "line", test: "pack", "data-n": ps.n, "data-of": ps.of, text: "Звук урока " + lessonNum(L) + (navigator.onLine === false ? ": скачан на " : " качается… ") + Math.round(ps.n / Math.max(1, ps.of) * 100) + " %" }));
   mount(h("section", { class: "scr tabbed", "data-screen": scr, "data-tab": "today" }, body, tabs("today")));
   if (UI.updated) { const v = UI.updated; UI.updated = null; showUpdated(v); }
   if (scr === "2.3") prebuildPack();
+  if (UI.reloadPending && scr === "2.3") setTimeout(() => { if (UI.reloadPending && calmSpot()) reloadNow(); }, 3200); // 8б: обновление — на 2.3 без открытых листов
+}
+function awayDays(d) { // сколько местных дней подряд без занятий до сегодня (0 — вчера занимался или ещё ни разу)
+  let last = -1;
+  for (const k in ST.days) if (+k < d && (ST.days[k].done || ST.days[k].a) && +k > last) last = +k;
+  return last < 0 ? 0 : d - last - 1;
+}
+function lessonAsk(L, d) { // 2.5: все слова урока введены — «На парах всё ещё урок N?», не чаще раза в 7 дней
+  const cur = lessonOf(L), next = cur && LESSONS.find(l => l.book === cur.book && l.n === cur.n + 1);
+  if (!cur || !next || unknownActive(L).length || !lessonWords(L).some(isActive)) return null;
+  const a = ST.lask && ST.lask.l === L ? ST.lask : null;
+  if (a && (a.ans ? d - a.d < 7 : d !== a.d && d - a.d < 7)) return null;
+  if (!a || a.d !== d) { ST.lask = { l: L, d, ans: 0 }; commit([{ k: "ask", t: Date.now(), l: L }]); }
+  return h("div", { class: "card", test: "lesson-check", "data-lesson": cur.n, "data-n": readyOf(L).n, "data-of": readyOf(L).of }, h("h2", { text: "На парах всё ещё урок " + cur.n + "?" }),
+    h("p", { class: "line", text: "Все слова урока " + cur.n + " уже были. Если на парах дальше — новое возьму из следующего." }),
+    h("div", { class: "brow" },
+      h("button", { type: "button", class: "btn sec", test: "lesson-same", text: "Да", onclick: () => { ST.lask = { l: L, d, ans: 1 }; commit([{ k: "ask", t: Date.now(), l: L, a: "same" }]); renderToday(); } }),
+      h("button", { type: "button", class: "btn main", test: "lesson-next", text: "Уже " + next.n, onclick: () => { ST.lask = null; setLesson({ id: next.id }); renderToday(); downloadSoon(); } })));
 }
 function showUpdated(v) {
   if (UI.inSession) return;
-  const p = overlay(h("div", { class: "plate", "data-overlay": "1.9", "data-version": VERSION, role: "status", text: "Обновлено: новая версия приложения" + (v ? " (" + v + ")" : "") }));
+  const add = (UI.added || []).map(lessonNum).filter(Boolean); UI.added = null;
+  const p = overlay(h("div", { class: "plate", "data-overlay": "1.9", "data-version": VERSION, role: "status", text: add.length ? "Обновлено: " + (add.length > 1 ? "уроки " + add.join(", ") + " добавлены" : "урок " + add[0] + " добавлен") : "Обновлено: новая версия приложения" + (v ? " (" + v + ")" : "") }));
   setTimeout(() => p.remove(), 3000);
 }
 
@@ -957,13 +1117,14 @@ function saveFailed(why) { // запись не проходит — честн�
   if ($("[data-test=save-fail]")) return;
   document.body.append(h("div", { class: "plate warn", test: "save-fail", role: "alert", text: "Не сохраняется — закрой и открой приложение" }));
 }
-function beginDay() {
+function beginDay(kind) {
+  kind = typeof kind === "string" ? kind : "day";
   Player.unlock();
-  const plan = planDay(), t = Date.now();
-  SESS = { id: rid(), d: plan.d, t0: t, parts: plan.parts.map(p => ({ p, q: null, i: 0, ms: 0 })), pi: 0, n: 0, act: 0, newN: plan.newN, wrong: [], again: false,
+  const plan = planDay(kind), t = Date.now();
+  SESS = { id: rid(), kind, d: plan.d, t0: t, parts: plan.parts.map(p => ({ p, q: null, i: 0, ms: 0 })), pi: 0, n: 0, act: 0, newN: plan.newN, revCap: plan.revCap, wrong: [], again: false,
     st: { tones: [0, 0], recall: [0, 0], newW: [], newOf: 0, check: null } };
   Run.lastTick = t;
-  commit([{ k: "S", t, s: SESS.id, d: plan.d, parts: plan.parts.join(","), L: plan.L }]);
+  commit([{ k: "S", t, s: SESS.id, d: plan.d, parts: plan.parts.join(","), L: plan.L, kind }]);
   UI.inSession = true;
   nextQuestion();
 }
@@ -994,7 +1155,7 @@ function nextQuestion() {
       }
       return finishDay();
     }
-    if (!pt.q) { pt.q = buildPart(pt.p, { d: SESS.d, L: curLesson(), newN: SESS.newN }, SESS); if (pt.p === "new") SESS.st.newOf = pt.q.filter(q => q.x === "4.1").length;
+    if (!pt.q) { pt.q = buildPart(pt.p, { d: SESS.d, L: curLesson(), newN: SESS.newN, kind: SESS.kind || "day", revCap: SESS.revCap || REVIEW_MAX }, SESS); if (pt.p === "new") SESS.st.newOf = pt.q.filter(q => q.x === "4.1").length;
       if (pt.p === "recall" && !SESS.again) { // ошибки дня — перед «Скажи по памяти», чтобы после записи звука было меньше
         const rep = SESS.wrong.filter(id => W(id) && playable(id)).map(id => { const x = q48(id, pt.p); x.again = true; return x; });
         if (rep.length) { SESS.again = true; pt.q = rep.concat(pt.q); }
@@ -1028,7 +1189,7 @@ function head(pt) {
   const i = SESS.parts.indexOf(pt), n = Math.min(pt.i + 1, pt.q.length), of = pt.q.length;
   const parts = SESS.parts.map((x, j) => h("div", { class: "part", test: "part", "data-part": x.p, "data-state": j < i ? "done" : j === i ? "now" : "todo", style: j === i ? "--p:" + Math.max(6, Math.round(pt.i / Math.max(1, of) * 100)) + "%" : null }, h("i")));
   const left = Math.max(1, Math.ceil(sessLeftMs() / MIN));
-  return h("div", { class: "shead", test: "session-head" },
+  return h("div", { class: "shead", test: "session-head", "data-session": SESS.kind || "day" },
     h("button", { type: "button", class: "btn icon", test: "close", "aria-label": "Пауза", html: I.x, onclick: pause }),
     h("div", { class: "parts", test: "progress" }, parts),
     h("div", { class: "tleft", test: "time-left", "data-min": left, text: "≈ " + left + " мин" }),
@@ -1182,10 +1343,11 @@ function showSay(q, pt) {
     h("button", { type: "button", class: "btn link", test: "reveal", style: "align-self:center;margin-top:6px", text: "Не вспомнил — показать", onclick: () => showSayResult(q, pt, null) })];
   exScreen(q, pt, "4.9", kids, h("div", { class: "zone low" }), null, h("button", { type: "button", class: "btn link", test: "cant-speak", text: "Не могу говорить", onclick: cantSpeak }));
 }
-function cantSpeak() {
+function cantSpeak() { // «Не могу говорить»: микрофон на час выключен; это слово — 4.13 off-hour (скажи про себя, послушай, отметь честно), дальше «скажи» пропускаем
   ST.set.micOff = Date.now() + 60 * MIN;
-  toast("Микрофон выключен на час — «скажи» вернётся позже");
   commit([{ k: "off", t: Date.now(), what: "mic" }]);
+  if (SESS && Run.q && Run.q.x === "4.9" && !Run.answered) return showMicTrouble(Run.q, SESS.parts[SESS.pi], "off-hour", "");
+  toast("Микрофон выключен на час — «скажи» вернётся позже");
   skipQ("cant-speak");
 }
 async function startRec(q, pt) {
@@ -1207,25 +1369,48 @@ async function startRec(q, pt) {
   } catch (e) {
     const why = e && e.reason ? e.reason : "no-mic", d = Mic.diag || {};
     if (!(e && e.reason) && !d.name) d.name = errText(e); // ошибка программы, а не отказ iPhone
-    const code = [d.name || "—", "ctx " + (d.ctx0 || "?") + "→" + (d.ctx || "?"), "сессия " + (d.sess || "?"), "отсчётов " + (d.n || 0) + " (" + (d.chunks || 0) + ")", d.retry ? "повтор" : "", d.wl, d.rate ? d.rate + " Гц" : "", d.peak != null ? "пик " + d.peak : ""].filter(Boolean).join(" · ");
+    const code = [d.name || why, "ctx " + (d.ctx0 || "?") + "→" + (d.ctx || "?"), "сессия " + (d.sess || "?"), "отсчётов " + (d.n || 0) + " (" + (d.chunks || 0) + ")", d.retry ? "повтор" : "", d.wl, d.rate ? d.rate + " Гц" : "", d.lvl || (d.peak != null ? "пик " + d.peak : "")].filter(Boolean).join(" · ");
     commit([{ k: "M", t: Date.now(), why, e: e && e.err ? String(e.err).slice(0, 120) : errText(e), code }]);
-    showMicTrouble(q, pt, why, code);
+    showMicTrouble(q, pt, why, code, e && e.rec, e && e.top, Mic.endAt ? Math.round(performance.now() - Mic.endAt) : null);
   }
 }
-const MIC_TXT = {
+const MIC_TXT = { // 4.13 — 12 причин, у каждой свой текст; слово «громче» — только у quiet
+  // denied: путь «Настройки → Safari → Микрофон» для приложения с экрана «Домой» на iOS 26 НЕ ПРОВЕРЕН (беда 10)
   denied: ["Нет доступа к микрофону", "iPhone спросит ещё раз — нажми «Разрешить». Не спрашивает? Настройки → Safari → Микрофон → «Спрашивать»."],
-  "no-mic": ["Микрофон не нашёлся или занят", "Закончи звонок или диктофон и нажми «Ещё раз». В WeChat и Telegram микрофон не работает — открой «Китайский» с экрана «Домой»."],
-  busy: ["Микрофон сейчас не включается", "Закрой приложение смахиванием вверх и открой снова. Не помогло — закончи звонок или диктофон и нажми «Ещё раз»."],
-  silent: ["Ничего не услышал", "Нажми, дождись, пока кнопка станет красной, и скажи слово целиком. Держи телефон сантиметрах в 20 от рта."]
+  "no-mic": ["Микрофон не нашёлся", "Нажми «Ещё раз». Не помогло — закрой приложение смахиванием вверх и открой снова."],
+  busy: ["Микрофон занят", "Микрофон занят другим приложением — звонком или диктофоном. Закончи и нажми «Ещё раз»."],
+  stuck: ["Микрофон сейчас не включается", "Закрой приложение смахиванием вверх и открой снова."],
+  blocked: ["Здесь микрофон не работает", "Открой «Китайский» с экрана «Домой»: в WeChat и Telegram микрофона нет."],
+  silent: ["Ничего не услышал", "Нажми, дождись, пока кнопка станет красной, и скажи слово целиком. Держи телефон сантиметрах в 20 от рта."],
+  quiet: ["Тихо — скажи громче", "Почти не слышу. Поднеси телефон ближе, сантиметров на 20."],
+  noise: ["Вокруг шумно — голос тонет", "Отойди в тихое место или говори в наушники с микрофоном."],
+  short: ["Слишком коротко", "Дождись, пока кнопка станет красной, и скажи слово целиком, не обрывая."],
+  loud: ["Слишком громко — звук хрипит", "Держи телефон чуть дальше от рта."],
+  unsure: ["Не уверен, какой тон", "Линия голоса не построилась. Послушай себя и диктора — сравни сам."],
+  "off-hour": ["Микрофон выключен", "Скажи про себя и послушай диктора. «Пропустить запись» — дальше, без оценки этого слова."]
 };
-function showMicTrouble(q, pt, why, code) {
-  const t = MIC_TXT[why] || MIC_TXT["no-mic"];
-  const kids = [h("div", { class: "etitle", text: "Микрофон" }), h("div", { class: "card" }, h("h2", { test: "reason", text: t[0] }), h("p", { class: "line", test: "help", text: t[1] }),
-    code ? h("p", { class: "note", test: "mic-code", style: "margin-top:8px;word-break:break-word", text: "Код для Claude: " + code }) : null)];
+function showMicTrouble(q, pt, why, code, rec, top, took) {
+  const t = MIC_TXT[why] || MIC_TXT["no-mic"], off = why === "off-hour", url = clipOf(q.w);
+  const card = h("div", { class: "card" }, h("h2", { test: "reason", text: off ? "Микрофон выключен до " + hhmm(ST.set.micOff) : t[0] }), h("button", { type: "button", class: "line", test: "help", style: "display:block;width:100%;min-height:44px;text-align:left;background:none;border:0;padding:0;color:inherit;font:inherit", text: t[1] }));
+  if (why === "quiet") { // полоска уровня с меткой «нужно до сюда» (на пороге)
+    const at = Math.round(MIC_LIM.quietTop / 0.06 * 100);
+    card.append(h("div", { style: "position:relative;height:12px;border-radius:6px;background:var(--soft);margin:10px 0 2px" },
+      h("i", { style: "position:absolute;left:0;top:0;bottom:0;border-radius:6px;background:var(--bad);width:" + Math.min(100, Math.round((top || 0) / 0.06 * 100)) + "%" }),
+      h("i", { style: "position:absolute;top:-4px;bottom:-4px;width:2px;background:var(--tx);left:" + at + "%" })),
+      h("p", { class: "note", style: "margin-left:" + Math.max(0, at - 4) + "%", text: "↑ нужно до сюда" }));
+  }
+  if (why === "unsure" || off) { // запись и «послушай себя» остаются
+    const row = h("div", { class: "brow", style: "margin-top:10px" });
+    if (rec && rec.pcm) { const meUrl = URL.createObjectURL(makeWav(downsample(rec.pcm, rec.rate, 16000), 16000)); const meB = h("button", { type: "button", class: "vbtn", test: "play", "data-voice": "me", "data-state": "idle", text: "▶ Я" }); meB.addEventListener("click", () => Player.play(meUrl, { btn: meB, raw: true })); row.append(meB); }
+    row.append(playBtn(url, "sm", { "data-voice": "ref", class: "vbtn", html: "▶ Диктор" })); card.append(row);
+  }
+  if (code) card.append(h("p", { class: "note", test: "mic-code", style: "margin-top:8px;word-break:break-word", text: "Код для Claude: " + code }));
+  const on = () => { ST.set.micOff = 0; commit([{ k: "off", t: Date.now(), what: "mic-on" }]); showSay(q, pt); };
   const zone = h("div", { class: "zone low" },
-    h("button", { type: "button", class: "btn main", test: "retry", text: "Ещё раз", onclick: () => startRec(q, pt) }),
-    h("button", { type: "button", class: "btn sec", test: "skip-rec", text: "Пропустить запись", onclick: () => showSayResult(q, pt, null) }));
-  exScreen(q, pt, "4.13", kids, zone, { "data-reason": why });
+    off ? h("button", { type: "button", class: "btn main", test: "mic-on", text: "Включить микрофон", onclick: on }) : null,
+    h("button", { type: "button", class: off ? "btn sec" : "btn main", test: "retry", text: "Ещё раз", onclick: () => off ? on() : startRec(q, pt) }),
+    h("button", { type: "button", class: "btn sec", test: "skip-rec", text: "Пропустить запись", onclick: () => off ? skipQ("cant-speak") : showSayResult(q, pt, null) }));
+  exScreen(q, pt, "4.13", [h("div", { class: "etitle", text: "Микрофон" }), card], zone, { "data-reason": why, "data-took": took });
 }
 function showSayResult(q, pt, rec) {
   const w = W(q.w), url = clipOf(q.w), syl = sylls(w.py).map(s => s.s);
@@ -1238,7 +1423,7 @@ function showSayResult(q, pt, rec) {
     meB.addEventListener("click", () => Player.play(meUrl, { btn: meB, raw: true }));
     row.append(meB);
     gwrap.innerHTML = graphSVG(null, null, syl);
-    const me = contour(pitchTrack(rec.pcm, rec.rate));
+    const me = rec.me || null; // линия посчитана при разборе записи (micVerdict) — без долгих задач
     refContour(url).then(ref => { if (gwrap.isConnected) gwrap.innerHTML = graphSVG(ref, me, syl); });
   }
   row.append(refB, h("button", { type: "button", class: "vbtn", test: "retry", text: "Ещё раз", onclick: () => startRec(q, pt) }));
@@ -1251,7 +1436,7 @@ function showSayResult(q, pt, rec) {
     row, h("p", { class: "note", test: "honest-note", text: "Тон по слогам пока не оцениваю — сравни на слух и по линии." })];
   const zone = h("div", { class: "zone low" }, h("div", { class: "ehint", text: "Как вспомнил?" }),
     h("div", { class: "grades" }, grade(0, "Не вспомнил"), grade(1, "Почти"), grade(2, "Знал")));
-  exScreen(q, pt, "4.11", kids, zone, { "data-rec": rec ? "graph" : "none" });
+  exScreen(q, pt, "4.11", kids, zone, { "data-rec": rec ? "graph" : "none", "data-took": rec && Mic.endAt ? Math.round(performance.now() - Mic.endAt) : null });
   if (!rec) Player.play(url, { btn: refB });
 }
 function downsample(pcm, from, to) {
@@ -1271,26 +1456,36 @@ function pause() {
     h("h2", { text: "Пауза" }),
     h("p", { test: "saved", "data-n": SESS.n, text: (SESS.n ? "Всё сохранено (" + SESS.n + " " + plural(SESS.n, "ответ", "ответа", "ответов") + ")" : "Всё сохранено") + ". Продолжишь с этого места." }),
     h("button", { type: "button", class: "btn main", test: "resume", text: "Продолжить", onclick: close }),
-    h("button", { type: "button", class: "btn sec", test: "home", text: "Выйти на «Сегодня»", onclick: () => { close(); UI.inSession = false; Player.stop(); if (UI.reloadPending) return reloadNow(); renderToday(); } }),
+    h("button", { type: "button", class: "btn sec", test: "home", text: "Выйти на «Сегодня»", onclick: () => { close(); UI.inSession = false; Player.stop(); renderToday(); } }), // обновление — на 2.3 или при уходе в фон (8б)
     h("p", { class: "line", text: "Жест «назад» тоже ставит паузу." }))));
 }
 function finishDay() {
   tick();
-  const s = SESS, now = Date.now(), d = s.d != null ? s.d : dayNum(now), min = Math.max(1, Math.round(s.act / MIN));
-  const evs = [{ k: "F", t: now, s: s.id, d, min, n: s.n }];
+  const s = SESS, now = Date.now(), d = s.d != null ? s.d : dayNum(now), min = Math.max(1, Math.round(s.act / MIN)), kind = s.kind || "day";
+  const evs = [{ k: "F", t: now, s: s.id, d, min, n: s.n, kind }];
   const first = !dayDone(d);
-  if (first) evs.push({ k: "D", t: now, d, min });
+  if (first) evs.push(kind === "save" ? { k: "D", t: now, d, min, sv: 1 } : { k: "D", t: now, d, min, kind }); // «Спасти день» — своей пометкой sv
+  else if (kind !== "save" && ST.days[d] && ST.days[d].sv) evs.push({ k: "D", t: now, d, min: (ST.days[d].done || 0) + min, kind }); // круг 1, №8: после «Спасти день» полное занятие — день засчитан (D без sv, минуты за день)
   evs.forEach(apply);
-  ST.last = { d, min, st: s.st, wrong: s.wrong.slice(0, 12), first };
+  ST.last = { d, min, st: s.st, wrong: s.wrong.slice(0, 12), first, kind };
   SESS = null; UI.inSession = false;
   commit(evs);
   showSummary();
 }
 function showSummary() {
   const last = ST.last, st = last.st, d = last.d, nl = st.newW.map(id => W(id) ? W(id).hz : "").join(" ");
-  const ck = st.check;
+  const ck = st.check, kind = last.kind || "day", sk = streak();
+  if (kind === "save") { // 5.2 «Спасти день»
+    mount(h("section", { class: "scr", "data-screen": "5.2" }, h("div", { class: "body" },
+      h("div", { class: "done-big", test: "day-done", "data-min": last.min }, h("span", { class: "seal", text: "✓" }), "Серия сохранена"),
+      h("p", { class: "line", test: "streak", "data-days": sk, text: sk + " " + plural(sk, "день", "дня", "дней") + " подряд · " + last.min + " мин" }),
+      h("p", { class: "line", test: "tomorrow", text: "Завтра — обычные 15 минут." + (last.wrong.length ? " Вернутся: " + last.wrong.map(id => W(id) ? W(id).hz : "").join(", ") : "") }),
+      copyBtn("btn sec")),
+      h("div", { class: "foot" }, h("button", { type: "button", class: "btn main", test: "done", text: "Готово", onclick: () => renderToday() }))));
+    return prebuildPack();
+  }
   const body = h("div", { class: "body" },
-    h("div", { class: "done-big", test: "day-done", "data-min": last.min }, h("span", { class: "seal", text: "✓" }), "День засчитан"),
+    h("div", { class: "done-big", test: kind === "more" ? null : "day-done", "data-min": last.min }, h("span", { class: "seal", text: "✓" }), kind === "more" ? "Ещё 15 минут — готово" : "День засчитан"),
     h("p", { class: "line", test: "streak", "data-days": streak(), text: last.min + " мин · " + streak() + " " + plural(streak(), "день", "дня", "дней") + " подряд" }),
     h("div", { class: "skills" },
       h("div", { class: "skill", test: "skill", "data-skill": "tones", "data-n": st.tones[0], "data-of": st.tones[1] }, h("span", { text: "Тоны на слух" }), h("b", { text: st.tones[1] ? st.tones[0] + " из " + st.tones[1] : "сегодня не было" })),
@@ -1299,8 +1494,9 @@ function showSummary() {
     ck ? h("p", { class: "card", test: "check-line", "data-lesson": lessonNum(ck.l), text: "Урок " + lessonNum(ck.l) + ": узнал " + ck.n + " из " + ck.of + ". Узнанные вернутся через 3–7 дней, остальные — новыми словами." }) : null,
     h("p", { class: "line", test: "tomorrow", text: last.wrong.length ? "Завтра вернутся: " + last.wrong.map(id => W(id) ? W(id).hz : "").join(", ") : "Ошибок нет — завтра только то, что по сроку." }),
     copyBtn("btn sec"));
-  mount(h("section", { class: "scr", "data-screen": "5.1" }, body,
-    h("div", { class: "foot" }, h("button", { type: "button", class: "btn main", test: "done", text: "На сегодня всё", onclick: () => renderToday() }))));
+  mount(h("section", { class: "scr", "data-screen": kind === "more" ? "5.4" : "5.1" }, body,
+    h("div", { class: "foot" }, h("button", { type: "button", class: "btn sec", test: "more", "data-min": 15, text: "Ещё 15 минут", onclick: () => beginDay("more") }),
+      h("button", { type: "button", class: "btn main", test: "done", text: "На сегодня всё", onclick: () => renderToday() }))));
   prebuildPack();
 }
 
@@ -1324,6 +1520,7 @@ function renderMe() {
     h("button", { type: "button", class: "row", test: "settings", style: "margin-top:14px", onclick: renderSettings }, h("span", { text: "Настройки" }), h("span", { class: "chev", text: "›" })),
     h("p", { class: "line", text: "Не очищай данные Safari — сотрёт прогресс на телефоне." }));
   mount(h("section", { class: "scr tabbed", "data-screen": "8.1", "data-tab": "me" }, body, tabs("me")));
+  const pl = partLine(); if (pl) sent.after(pl); // «часть 1 из 2 скопирована — отправь часть 2» (круг 1, №3)
   pendingCount().then(n => {
     const s = sentInfo(n); sent.setAttribute("data-at", s.at); sent.setAttribute("data-pending", n); sent.setAttribute("data-state", s.state);
     sent.firstChild.textContent = s.text;
@@ -1350,6 +1547,7 @@ function renderSettings() {
     h("div", { class: "set" }, h("span", { text: mm ? "Микрофон выключен до " + hhmm(ST.set.micOff) : "Не могу говорить — выключить микрофон на час" }),
       h("button", { type: "button", class: "btn sw", test: "mute-mic", "data-state": mm ? "on" : "off", "aria-pressed": mm ? "true" : "false", text: mm ? "Вкл." : "Выкл.", onclick: () => { ST.set.micOff = mm ? 0 : Date.now() + 60 * MIN; commit([{ k: "off", t: Date.now(), what: mm ? "mic-on" : "mic" }]); renderSettings(); } })),
     h("div", { style: "margin-top:14px" }, copyBtn("btn sec")),
+    h("button", { type: "button", class: "row", test: "restore", style: "margin-top:10px", onclick: () => showRestore("settings") }, h("span", { text: "Вернуть прогресс (код от Claude)" }), h("span", { class: "chev", text: "›" })),
     h("p", { class: "ver", test: "version", "data-version": VERSION, text: "Версия " + VERSION }));
   mount(h("section", { class: "scr tabbed", "data-screen": "8.2", "data-tab": "me" }, body, tabs("me")));
   prebuildPack();
@@ -1385,9 +1583,12 @@ function downloadSoon() { // звук урока на парах и следую
     const L = curLesson(), lids = packNow().lids;
     if (lids.every(l => { const s = Snd.state(l); return s.n === s.of; })) return;
     const live = () => { const pk = packNow(), el = $("[data-test=downloaded]"); if (el) { el.setAttribute("data-n", pk.n); el.setAttribute("data-of", pk.of); el.textContent = "Звук " + pk.name + ": скачано " + pk.n + " из " + pk.of; } };
-    await Snd.download(lids, p => { live(); const el = $("[data-test=pack]"); if (el) { const s = Snd.state(L); el.setAttribute("data-n", s.n); el.textContent = "Звук урока " + lessonNum(L) + ": скачано " + s.n + " из " + s.of + " · качаю…"; } });
+    if (Snd.busy) { downloadSoon(); return; } // идёт закачка прошлого урока — следом, иначе пакет нового урока не скачается и не проверится (3б)
+    const sayBroken = () => { if (lessonBroken(L) && UI.brokenSaid !== L && UI.tab === "today" && !UI.inSession && $("[data-screen='2.1'],[data-screen='2.7']") && !$("[data-test=lesson-broken]")) { UI.brokenSaid = L; renderToday(); } }; // 3б: пакет урока битый — сказать сразу; только на 2.1 / 2.7 и один раз на урок (круг 1, №7: на 2.3 строки нет — перерисовка шла на каждый клип)
+    await Snd.download(lids, p => { live(); const el = $("[data-test=pack]"); if (el) { const s = Snd.state(L); el.setAttribute("data-n", s.n); el.textContent = "Звук урока " + lessonNum(L) + ": скачано " + s.n + " из " + s.of + " · качаю…"; } sayBroken(); });
     live();
     const el = $("[data-test=pack]"); if (el) { const s = Snd.state(L); if (s.n === s.of) el.remove(); else el.textContent = "Звук урока " + lessonNum(L) + ": скачано " + s.n + " из " + s.of; }
+    sayBroken();
   }, 1200);
 }
 
@@ -1417,26 +1618,79 @@ async function buildPack() {
   const m = lessonMode(), L = curLesson(), sw = await readSwLog();
   const head = [
     "КИТАЙСКИЙ → Claude · прогресс · " + dayStr(d).split("-").reverse().join(".") + " " + hhmm(Date.now()) + " · версия " + VERSION,
-    "Серия " + streak() + " · сегодня " + (dayDone(d) ? "засчитан (" + ST.days[d].done + " мин)" : "не засчитан") + " · урок на парах: " + (m === "lesson" ? lessonNum(L) : m === "other" ? "не из 1上, догоняю " + lessonNum(L) : "не знаю, догоняю " + lessonNum(L)),
+    "Серия " + streak() + " · сегодня " + (dayDone(d) ? (ST.days[d].sv ? "серия спасена («Спасти день», " + ST.days[d].done + " мин)" : "засчитан (" + ST.days[d].done + " мин)") : "не засчитан") + " · урок на парах: " + (m === "lesson" ? lessonNum(L) : m === "other" ? "не из 1上, догоняю " + lessonNum(L) : "не знаю, догоняю " + lessonNum(L)),
     "Знаю слов " + ids.filter(known).length + " · выучено " + ids.filter(learned).length + " · ждут повторения " + dueList(d).length + " · за 7 дней: дней " + days7 + ", ответов " + a + (a ? ", верно " + Math.round(r / a * 100) + " %" : ""),
     "С «Домой»: " + (document.documentElement.getAttribute("data-standalone") === "true" ? "да" : "нет") + " · звук после записи: " + AFTER_REC + " · audioSession: " + (navigator.audioSession ? "есть" : "нет") + " · " + (navigator.userAgent.match(/OS [\d_]+/) || [""])[0].replace(/_/g, "."),
     "Service worker: " + (sw.length ? sw.map(e => hhmm(e.t) + " " + e.k + (e.from ? " " + e.from : "") + (e.err ? " ✗" + e.err : "") + (e.on === false ? " без сети" : "")).join(" | ") : "журнала нет"),
     "Устройство: " + ST.dev + " · события с №" + (from + 1),
     "Вставь это сообщение целиком в чат «Китайский» — Claude сам положит его в файл (progress.py import)."
   ];
-  const lines = rows.map(x => { const body = JSON.stringify(x.v); return "#" + String(x.k).padStart(6, "0") + " " + body + " ·" + crc32(body).slice(0, 4); });
-  const last = rows.length ? rows[rows.length - 1].k : from, LIMIT = 18 * 1024 - 1500, parts = []; // вставка > 20 КБ с iPhone не проверена — части ≤ 18 КБ
-  let cur = [], size = 0;
-  for (const ln of lines) { const b = utf8(ln).length + 1; if (cur.length && size + b > LIMIT) { parts.push(cur); cur = []; size = 0; } cur.push(ln); size += b; }
-  if (cur.length || !parts.length) parts.push(cur);
+  const last = rows.length ? rows[rows.length - 1].k : from, LIMIT = 18 * 1024 - 1500; // вставка > 20 КБ с iPhone не проверена — части ≤ 18 КБ
+  let snapLine = null;
+  try { // последней строкой — сжатый снимок состояния (#000000, k=Z): из него Claude делает код «Вернуть прогресс» (1.8)
+    const zs = await zipText(JSON.stringify(snapState(last))), sb = JSON.stringify({ k: "Z", n: last, t: Date.now(), zf: zs.zf, z: zs.z });
+    snapLine = rowLine(0, sb);
+  } catch (e) { logErr("снимок: " + errText(e)); }
+  const sn = snapLine ? utf8(snapLine).length + 1 : 0;
+  let parts = await zipParts(rows, LIMIT, sn); // круг 1, №4: события сжаты (deflate-raw + base64 строками с суммами); без CompressionStream — текстом, как раньше
+  if (!parts) {
+    parts = []; let cur = [], size = 0;
+    for (const ln of rows.map(x => rowLine(x.k, JSON.stringify(x.v)))) { const b = utf8(ln).length + 1; if (cur.length && size + b > LIMIT) { parts.push(cur); cur = []; size = 0; } cur.push(ln); size += b; }
+    if (cur.length || !parts.length) parts.push(cur);
+    if (sn && cur.length && size + sn > LIMIT) parts.push([]);
+  }
+  if (snapLine) parts[parts.length - 1].push(snapLine);
   const texts = parts.map((pl, i) => {
     const all = pl.join("\n"), sum = crc32(all), hd = i === 0 ? head.slice() : [head[0], head[head.length - 2]];
     if (parts.length > 1) hd[0] += " · часть " + (i + 1) + " из " + parts.length;
     return hd.join("\n") + "\n=== ПРОВЕРКА ВСТАВКИ · строк " + pl.length + " · байт " + utf8(all).length + " · контроль " + sum + " ===\n" + all + (all ? "\n" : "") + "=== КОНЕЦ · строк " + pl.length + " · контроль " + sum + " ===";
   });
-  return { texts, text: texts[0], from, upto: Math.max(last, ST.copy.upto || 0), rows: lines.length };
+  return { texts, text: texts[0], from, last, upto: Math.max(last, ST.copy.upto || 0), rows: rows.length + (snapLine ? 1 : 0) };
 }
-function prebuildPack() { buildPack().then(p => { UI.pack = p; UI.packAt = Date.now(); UI.packPart = 0; }, e => logErr("пакет: " + errText(e))); }
+const rowLine = (k, body) => "#" + String(k).padStart(6, "0") + " " + body + " ·" + crc32(body).slice(0, 4);
+async function zipRaw(s) { // deflate-raw → base64; нет CompressionStream или ошибка — null (тогда пакет текстом)
+  if (!window.CompressionStream) return null;
+  try { return b64enc(new Uint8Array(await new Response(new Blob([utf8(s)]).stream().pipeThrough(new CompressionStream("deflate-raw"))).arrayBuffer())); } catch (e) { return null; }
+}
+/* События → части пакета. В каждой части свой сжатый поток (часть принимается отдельно): строка #000000 {"k":"Y","zf":"deflate-raw","a":первое,"b":последнее,"n":событий,"m":строк},
+   за ней m строк #00000j <base64 по 600 знаков> ·xxxx; внутри — JSONL, номер события — поле "i". Разбор — progress.py parse_rows(). */
+async function zipParts(rows, LIMIT, sn) {
+  if (!rows.length) return [[]];
+  for (let N = 1; N <= 40; N++) {
+    const per = Math.ceil(rows.length / N), parts = [];
+    for (let i = 0; i < rows.length; i += per) {
+      const g = rows.slice(i, i + per), z = await zipRaw(g.map(x => JSON.stringify(Object.assign({ i: x.k }, x.v))).join("\n"));
+      if (z == null) return null;
+      const ls = [rowLine(0, JSON.stringify({ k: "Y", zf: "deflate-raw", a: g[0].k, b: g[g.length - 1].k, n: g.length, m: Math.ceil(z.length / 600) }))];
+      for (let j = 0; j < z.length; j += 600) ls.push(rowLine(j / 600 + 1, z.slice(j, j + 600)));
+      parts.push(ls);
+    }
+    if (parts.every((ls, k) => ls.reduce((s, l) => s + utf8(l).length + 1, 0) + (k === parts.length - 1 ? sn : 0) <= LIMIT)) return parts;
+  }
+  return null;
+}
+function prebuildPack() { packLoad(); if (packMid()) return; buildPack().then(p => { if (packMid()) return; UI.pack = p; UI.packAt = Date.now(); UI.packPart = 0; }, e => logErr("пакет: " + errText(e))); } // посреди копирования частей не трогаем (круг 1, №3)
+/* Части пакета (круг 1, №3): «часть 2 из N» держится, пока не скопированы все части или не появился новый ответ — сколько бы ни прошло.
+   Пакет с номером части — в sessionStorage: переживает перезагрузку после обновления в фоне (копирование как раз уводит в фон). */
+const PK = "zh2-pack";
+const packMid = () => !!(UI.pack && UI.packPart > 0 && UI.packPart < UI.pack.texts.length);
+function packSave() { try { if (packMid()) sessionStorage.setItem(PK, JSON.stringify({ dev: ST.dev, k: UI.packPart, p: UI.pack })); else sessionStorage.removeItem(PK); } catch (e) {} }
+function packLoad() {
+  if (UI.pack) return;
+  try { const x = JSON.parse(sessionStorage.getItem(PK) || "null"); if (x && x.p && x.dev === ST.dev && x.k > 0 && x.k < x.p.texts.length) { UI.pack = x.p; UI.packPart = x.k; UI.packAt = 0; } } catch (e) {}
+}
+async function packPick() { // → { p, k }: какой пакет и какую часть копировать сейчас
+  packLoad();
+  if (packMid()) {
+    let fresh = false;
+    try { await Run.saving; fresh = (await DB.since(UI.pack.last || 0, 20000)).some(x => x.v && x.v.k === "a"); } catch (e) {}
+    if (!fresh) return { p: UI.pack, k: UI.packPart };
+  }
+  const p = UI.pack && !UI.packPart && Date.now() - UI.packAt < 60000 ? UI.pack : await buildPack();
+  UI.pack = p; UI.packAt = Date.now(); UI.packPart = 0;
+  return { p, k: 0 };
+}
+function partLine() { packLoad(); return packMid() ? h("p", { class: "line", text: "Часть " + UI.packPart + " из " + UI.pack.texts.length + " скопирована — отправь часть " + (UI.packPart + 1) }) : null; }
 function copyText(t) {
   return new Promise(done => {
     const fallback = () => {
@@ -1450,25 +1704,22 @@ function copyText(t) {
   });
 }
 function copyBtn(cls) {
-  const b = h("button", { type: "button", class: cls, test: "copy-claude", "data-state": "idle", text: "Скопировать для Claude" });
+  packLoad();
+  const b = h("button", { type: "button", class: cls, test: "copy-claude", "data-state": "idle", text: packMid() ? "Скопировать ещё: часть " + (UI.packPart + 1) + " из " + UI.pack.texts.length : "Скопировать для Claude" });
   b.addEventListener("click", async () => {
     if (b.disabled) return;
     b.disabled = true; // двойное касание — одно копирование
     try {
-      let p = UI.pack && Date.now() - UI.packAt < 60000 ? UI.pack : null, ok = false;
-      if (!p || (UI.packPart || 0) >= p.texts.length) {
-        UI.packPart = 0;
-        const job = buildPack();
-        if (window.ClipboardItem && navigator.clipboard && navigator.clipboard.write) { // iPhone: текст собирается после касания
-          try { await navigator.clipboard.write([new ClipboardItem({ "text/plain": job.then(x => new Blob([x.texts[0]], { type: "text/plain" })) })]); ok = true; } catch (e) { ok = false; }
-        }
-        p = await job; UI.pack = p; UI.packAt = Date.now();
-        if (!ok) ok = await copyText(p.texts[0]);
-      } else ok = await copyText(p.texts[UI.packPart]);
-      const k = UI.packPart || 0;
+      const job = packPick(); let ok = false;
+      if (window.ClipboardItem && navigator.clipboard && navigator.clipboard.write) { // iPhone: текст собирается после касания (и для части 2 — после проверки «новый ответ?»)
+        try { await navigator.clipboard.write([new ClipboardItem({ "text/plain": job.then(x => new Blob([x.p.texts[x.k]], { type: "text/plain" })) })]); ok = true; } catch (e) { ok = false; }
+      }
+      const { p, k } = await job;
+      if (!ok) ok = await copyText(p.texts[k]);
       if (!ok) { showCopyText(p.texts[k]); return; }
       UI.packPart = k + 1;
       if (UI.packPart < p.texts.length) {
+        packSave();
         b.textContent = "Скопировать ещё: часть " + (UI.packPart + 1) + " из " + p.texts.length;
         toast("Скопирована часть " + UI.packPart + " из " + p.texts.length + " — вставь в окно 🀄 Китайский и нажми ещё раз", 4500);
         return;
@@ -1477,7 +1728,7 @@ function copyBtn(cls) {
       commit([]);
       b.setAttribute("data-state", "done"); b.textContent = "Скопировано ✓";
       toast("Скопировано ✓ " + PASTE_HINT, 5500);
-      UI.pack = null; UI.packPart = 0;
+      UI.pack = null; UI.packPart = 0; packSave();
       if (UI.tab === "me" && !UI.sub) setTimeout(() => { if (UI.tab === "me" && !UI.sub) renderMe(); }, 1500);
     } finally { b.disabled = false; }
   });
@@ -1489,6 +1740,95 @@ function showCopyText(t) {
   overlay(h("div", { class: "shade" }, h("div", { class: "sheet" }, h("h2", { text: "Не скопировалось само" }),
     h("p", { class: "line", text: "Нажми в текст, «Выбрать всё» → «Скопировать» и вставь в чат «Китайский»." }), ta,
     h("button", { type: "button", class: "btn main", text: "Готово", onclick: close }))));
+}
+
+/* ---------- 1.8 «Вернуть прогресс»: код от Claude (progress.py restore-code) ---------- */
+function showRestore(from) {
+  UI.restoreFrom = from; UI.tab = from === "settings" ? "me" : "today";
+  const ta = h("textarea", { test: "restore-code", rows: 6, autocomplete: "off", autocorrect: "off", autocapitalize: "off", spellcheck: "false", "aria-label": "Код от Claude", placeholder: "Вставь сюда код от Claude целиком",
+    style: "width:100%;min-height:150px;box-sizing:border-box;padding:10px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--tx);font:13px ui-monospace,Menlo,monospace" });
+  const res = h("div", { class: "card", test: "restore-result", "data-state": "idle", hidden: true, role: "status" });
+  const kb = h("div", { class: "kbdbar", test: "kbd-bar" }, h("button", { type: "button", class: "btn main", test: "check", text: "Проверить и вернуть", onclick: () => doRestore(ta.value, res) }));
+  const pre = h("div", {}); // круг 1, №2: есть неотправленные ответы — сначала отправить их, потом код
+  mount(h("section", { class: "scr", "data-screen": "1.8" }, h("div", { class: "body", style: "padding-bottom:120px" },
+    h("h1", { text: "Вернуть прогресс" }),
+    h("p", { class: "line", text: "Всё, что ты копировал для Claude, можно вернуть на этот телефон." }),
+    h("ol", { class: "steps" }, h("li", { text: "В приложении Claude → Code → окно 🀄 Китайский напиши: «верни прогресс»." }), h("li", { text: "Claude пришлёт код — нажми на него, он скопируется." }), h("li", { text: "Вставь сюда и нажми «Проверить»." })),
+    pre, ta, res,
+    h("button", { type: "button", class: "btn link", test: "start-fresh", text: from === "settings" ? "‹ Назад" : "Начать с нуля", onclick: () => from === "settings" ? renderSettings() : showFirst() })), kb));
+  kbdBar(kb);
+  unsentAnswers().then(n => { if (n && pre.isConnected) pre.append(h("p", { class: "line", text: "Сначала отправь Claude то, что есть на этом iPhone" }), copyBtn("btn sec")); });
+}
+async function unsentAnswers() { try { await Run.saving; return (await DB.since(ST.copy.upto || 0, 20000)).filter(x => x.v && x.v.k === "a").length; } catch (e) { return 0; } }
+function kbdBar(el) { // полоса над клавиатурой по visualViewport: кнопка видна и с открытой клавиатурой
+  const pb = "calc(8px + env(safe-area-inset-bottom))";
+  el.style.cssText = "position:fixed;left:0;right:0;bottom:0;z-index:40;padding:8px 16px;padding-bottom:" + pb + ";background:var(--bg);border-top:1px solid var(--line)";
+  const vv = window.visualViewport; if (!vv) return;
+  const fit = () => {
+    if (!el.isConnected) { vv.removeEventListener("resize", fit); vv.removeEventListener("scroll", fit); return; }
+    const k = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
+    el.style.bottom = k + "px"; el.style.paddingBottom = k ? "8px" : pb;
+  };
+  vv.addEventListener("resize", fit); vv.addEventListener("scroll", fit); fit();
+}
+const RS_HEAD = /^=== ПРОВЕРКА ВСТАВКИ · строк (\d+) · байт (\d+) · контроль ([0-9a-f]{8}) ===$/, RS_END = /^=== КОНЕЦ · строк \d+ · контроль [0-9a-f]{8} ===$/;
+async function restoreFrom(text) { // → { ok, reason: empty|format|sum, days, words }
+  const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n").map(s => s.trim()).filter(Boolean);
+  if (!lines.length) return { ok: false, reason: "empty" };
+  const hi = lines.findIndex(l => RS_HEAD.test(l));
+  if (hi < 0) return { ok: false, reason: "format" };
+  const m = lines[hi].match(RS_HEAD), rows = []; let end = false;
+  for (const l of lines.slice(hi + 1)) { if (RS_END.test(l)) { end = true; break; } rows.push(l); }
+  const all = rows.join("\n");
+  if (!end || rows.length !== +m[1] || utf8(all).length !== +m[2] || crc32(all) !== m[3]) return { ok: false, reason: "sum" };
+  let z = "";
+  for (const r of rows) { const x = r.match(/^#(\d{3,}) (\S+) ·([0-9a-f]{4})$/); if (!x || crc32(x[2]).slice(0, 4) !== x[3]) return { ok: false, reason: "sum" }; z += x[2]; }
+  let s = null;
+  try { s = JSON.parse(await unzipText(z, "deflate-raw")); } catch (e) { return { ok: false, reason: "format" }; }
+  if (!s || s.v !== 1 || !s.dev || !Array.isArray(s.w) || typeof s.n !== "number") return { ok: false, reason: "format" };
+  await Run.saving;
+  const was = ST.dev, same = was === s.dev, again = same && ST.rest === s.n; // номер устройства сравниваем до snapInto (он его перезаписывает)
+  const lastKey = await DB.lastKey(), keyR = Math.max(s.n, lastKey) + 1; // счётчик событий — дальше и кода, и своих событий
+  let mine = [];
+  if (same) { // тот же телефон (старый код, повтор): своё состояние не старше кода — значения по большему; prev не откатываем (круг 1, №4)
+    snapInto(s, false);
+    ST.copy = Object.assign({}, ST.copy, { prev: Math.max(ST.copy.prev || 0, s.n), upto: Math.max(s.n, ST.copy.upto || 0) });
+  } else { // телефон, где занимались под другим номером (круг 1, №2): снимок вливается (значения берём, не складываем), свои события — поверх, все
+    const evs = await DB.since(0), old = await DB.get("base"), from0 = ST.copy.prev || 0;
+    mine = evs.filter(x => x.k > from0 && x.v && x.v.k !== "R" && !x.v.cp).map(x => Object.assign({}, x.v, { cp: 1 })); // свои, которые могли не дойти до Claude (с перекрытием, как пакет)
+    ST = Object.assign({}, ST, { w: {}, days: {}, checked: {}, shown: {} });
+    if (old && old.v === 1) snapInto(old, false);
+    snapInto(s, false);
+    for (const x of evs) if (!old || x.k > old.n) apply(x.v);
+    ST.dev = s.dev;
+    ST.copy = Object.assign({}, ST.copy, { prev: keyR - 1, upto: keyR - 1 }); // следующий пакет — с метки R: дальше копии своих событий (cp) под новым номером; уже принятые под старым progress.py второй раз не считает
+  }
+  ST.rest = s.n;
+  UI.pack = null; UI.packPart = 0; packSave();
+  const kv = JSON.parse(JSON.stringify(again ? { st: ST, sess: SESS } : { st: ST, sess: SESS, base: snapState(keyR) })); // base — уже слитое состояние с номером метки R: пересчёт ничего своего не потеряет
+  try { localStorage.setItem("zh2-id", JSON.stringify({ dev: ST.dev, lesson: ST.lesson, copy: ST.copy })); } catch (e) {}
+  const ev = { k: "R", t: Date.now(), n: s.n, at: s.t, words: s.w.length, was };
+  const job = again ? DB.commit([], kv) : DB.putAt(ev, keyR, kv).then(() => mine.length ? DB.commit(mine, {}) : null); // тот же код второй раз — ничего не дописываем
+  Run.saving = job.catch(e => saveFailed(errText(e)));
+  await Run.saving;
+  return { ok: true, days: streak(), words: Object.keys(ST.w).filter(id => W(id)).length };
+}
+async function doRestore(text, res) {
+  let r; try { r = await restoreFrom(text); } catch (e) { logErr("вернуть прогресс: " + errText(e)); r = { ok: false, reason: "format" }; }
+  res.hidden = false; res.textContent = "";
+  res.setAttribute("data-state", r.ok ? "ok" : "bad");
+  if (!r.ok) {
+    res.setAttribute("data-reason", r.reason); res.removeAttribute("data-days"); res.removeAttribute("data-words");
+    res.append(h("h2", { text: r.reason === "empty" ? "Поле пустое" : r.reason === "sum" ? "Код повреждён" : "Это не код восстановления" }),
+      h("p", { class: "line", text: r.reason === "empty" ? "Вставь код от Claude целиком." : r.reason === "sum" ? "Суммы не сходятся — код обрезан или изменён. Нажми на код в чате ещё раз и вставь целиком." : "Напиши Claude «верни прогресс» и скопируй присланный код целиком." }));
+    return;
+  }
+  res.removeAttribute("data-reason"); res.setAttribute("data-days", r.days); res.setAttribute("data-words", r.words);
+  const go = () => { if (res.isConnected) { UI.tab = "today"; UI.sub = null; route(); } };
+  res.append(h("h2", { text: "Прогресс вернулся ✓" }),
+    h("p", { class: "line", text: "Серия: " + r.days + " " + plural(r.days, "день", "дня", "дней") + " · слов: " + r.words + (lessonMode() === "lesson" ? " · урок на парах " + lessonNum(ST.lesson.id) : "") + ". Через 2 секунды — «Сегодня»." }),
+    h("button", { type: "button", class: "btn main", test: "done", text: "На «Сегодня»", onclick: go }));
+  setTimeout(go, 2000); // экран уходит сам (догадка 8 тестировщика); кнопка — если не ждать
 }
 
 /* ===== main: запуск, «назад», обновление, журнал запусков и ошибок ===== */
@@ -1539,7 +1879,8 @@ function onBack() {
   if ($("[data-overlay='2.6']")) return closeOv("[data-overlay='2.6']");
   if (UI.inSession && SESS) return pause();
   if ($(".shade")) return closeOv(".shade");
-  if ($("[data-screen='5.1']")) return renderToday();
+  if ($("[data-screen^='5.']")) return renderToday();
+  if ($("[data-screen='1.8']")) return UI.restoreFrom === "settings" ? renderSettings() : showFirst();
   if (UI.sub === "settings") return renderMe();
   if (UI.tab === "me") return renderToday();
   // на главном — остаёмся в приложении: «назад» не выкидывает никогда
@@ -1553,7 +1894,8 @@ function reloadNow() {
   try { localStorage.setItem("zh2-updated", VERSION); } catch (e) {}
   location.reload();
 }
-function onUpdate() { if (UI.inSession) { UI.reloadPending = true; return; } reloadNow(); } // посреди занятия не перезагружаем — после выхода
+function calmSpot() { return !UI.inSession && !!$("[data-screen='2.3']") && !$(".shade") && !$("[data-overlay='2.6']"); }
+function onUpdate() { if (!calmSpot()) { UI.reloadPending = true; return; } reloadNow(); } // 8б: перезагрузка — на 2.3 без открытых листов или при уходе в фон; из занятия не выкидывает
 function saveNow() { if (SESS) { tick(); commit([]); } }
 
 async function boot() {
@@ -1563,11 +1905,11 @@ async function boot() {
   if (!dbok) { BOOT.fail("storage"); return; } // база не открылась — не уходим молча «в память»
   indexContent(data);
   BOOT.progress(2);
-  try { ST = await DB.get("st"); SESS = await DB.get("sess"); } catch (e) { ST = null; SESS = null; logErr("чтение памяти: " + errText(e)); }
+  try { ST = await DB.get("st"); SESS = await DB.get("sess"); } catch (e) { ST = null; SESS = null; logErr("чтение памяти: " + errText(e)); BOOT.fail("storage"); return; } // круг 1, №9: ошибка чтения — не «первый запуск»: чистое состояние затёрло бы настоящее
   if (!ST || !ST.w) {
     ST = freshState();
     try { const bk = JSON.parse(localStorage.getItem("zh2-id") || "null"); if (bk) Object.assign(ST, { dev: bk.dev || ST.dev, lesson: bk.lesson || null, copy: bk.copy || ST.copy }); } catch (e) {}
-    try { const evs = await DB.since(0); if (evs.length) rebuild(evs); } catch (e) {}
+    try { const evs = await DB.since(0), base = await DB.get("base"); if (evs.length || base) rebuild(evs, base); } catch (e) { logErr("чтение журнала: " + errText(e)); ST = null; BOOT.fail("storage"); return; }
   }
   if (SESS && !(SESS.parts && SESS.parts.length)) SESS = null;
   ST.set = Object.assign({ theme: "auto", micOff: 0, noListen: 0 }, ST.set);
@@ -1576,6 +1918,12 @@ async function boot() {
   try { localStorage.removeItem("zh2-updated"); } catch (e) {}
   if (ST.ver && ST.ver !== VERSION) UI.updated = VERSION; // первое открытие после обновления — плашка 1.9 на 3 с
   const prevVer = ST.ver; ST.ver = VERSION;
+  const lids = LESSONS.map(l => l.id), added = Array.isArray(ST.seenL) ? lids.filter(x => !ST.seenL.includes(x)) : [];
+  ST.seenL = lids;
+  if (added.length) { // «Обновлено: урок 16 добавлен»; занимался «не из 1上 / дальше 15» (2.7) — новый урок становится уроком на парах
+    UI.added = added; if (!UI.updated) UI.updated = VERSION;
+    if (ST.lesson && ST.lesson.other) { ST.lesson = { id: added[0] }; UI.autoLesson = added[0]; }
+  }
   applyTheme();
   BOOT.progress(3);
   await Snd.init();
@@ -1595,6 +1943,7 @@ async function boot() {
   if (BOOT.log && BOOT.log.length) commit([{ k: "E", t: Date.now(), m: "загрузка с повторами: " + BOOT.log.slice(-5).join(",") }]);
   if (BOOT.swErr) ev.swErr = BOOT.swErr;
   commit([ev]);
+  if (UI.autoLesson) commit([{ k: "lesson", t: Date.now(), l: UI.autoLesson, auto: 1 }]);
   if (!per && navigator.storage && navigator.storage.persist) navigator.storage.persist().then(ok => { if (ok) commit([{ k: "P", t: Date.now(), ok: 1 }]); }, () => {});
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.addEventListener("controllerchange", () => { if (hadCtrl) onUpdate(); });

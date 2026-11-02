@@ -3,7 +3,7 @@
    берёт открытые окна (clients.claim); окна старого приложения перезагружает сразу, окна v2 — сами решают когда
    (не посреди занятия). Страницу отдаёт новым ответом из байтов кэша — без пометки «перенаправлен» (проба 30.10).
    Журнал (IndexedDB «zh2-swlog»): вызывали ли его при запуске и что он отдал — уходит Claude в пакете. */
-const V = "152342241e";
+const V = "de78ceddd2";
 const SHELL_CACHE = "zh2-shell-" + V;
 const SND_CACHE = "zh2-snd"; // звук уроков: кладёт страница, переживает обновления версии
 const SHELL = ["./", "index.html", "app.js", "worklet.js", "manifest.webmanifest", "data/words.json", "icons/icon-180.png", "icons/icon-192.png", "icons/icon-512.png"];
@@ -56,7 +56,12 @@ self.addEventListener("install", e => {
     try {
       const c = await caches.open(SHELL_CACHE);
       await c.addAll(SHELL.map(p => new Request(p, { cache: first ? "default" : "reload" })));
-      await log({ k: "install", ok: true, n: SHELL.length, ms: Date.now() - t0, first });
+      let fix = 0; // HTTP-кэш мог отдать прошлую версию: в кэше должна быть версия V, иначе докачиваем мимо HTTP-кэша (мелочь 14)
+      for (const p of ["./", "index.html", "app.js"]) {
+        const hit = await c.match(abs(p), MATCH), txt = hit ? await hit.text() : "";
+        if (!txt.includes(V)) { await c.add(new Request(p, { cache: "reload" })); fix++; }
+      }
+      await log({ k: "install", ok: true, n: SHELL.length, ms: Date.now() - t0, first, fix });
     } catch (err) {
       await log({ k: "install", ok: false, err: errText(err), ms: Date.now() - t0 });
       await caches.delete(SHELL_CACHE).catch(() => {}); // пустой кэш не должен выдавать себя за «скачанное»
