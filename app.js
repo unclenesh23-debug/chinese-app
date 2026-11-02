@@ -1,767 +1,679 @@
-/* Китайский каждый день — сайт-приложение под iPhone. Всё в одном файле, без библиотек.
-   Содержимое — content.json (собирает build.py), прогресс — память телефона + закрытое хранилище GitHub. */
-(function(){
+/* Китайский v2 — собрано app-pwa/v2/build.py, исходник app-pwa/v2/src/js/ */
+(() => {
 "use strict";
-const VERSION = "af2059286c";
+/* ===== core: константы, мелочи, пиньинь, журнал (IndexedDB), повторение (ТЗ 4.4), план дня (ТЗ 2.2) ===== */
+const VERSION = "2e1ccd9278";
+/* Громкость речи после записи голоса — ОДНА константа, ведущий ставит победителя пробы 2:
+   "modes"  — audioSession "play-and-record" до записи и "playback" после (пауза 0,5 с), речь — тем же <audio>;
+   "stream" — речь всегда через Web Audio → MediaStream → второй <audio>;
+   "gain2"  — после первой записи речь через Web Audio с усилением ×2 и ограничителем;
+   "mr"     — запись через MediaRecorder без AudioContext, пауза 2,5 с, после записи — новый плеер;
+   "none"   — ничего особого. */
+const AFTER_REC = "modes";
+const MIN = 60000, DAY_MS = 86400000;
+const STEPS = [1, 3, 7, 14, 30, 60, 120];
+const PARTS = { warmup: "Разминка", review: "Повторение", check: "Проверка урока", new: "Новое", tones: "Тоны", recall: "Скажи по памяти" };
+const PART_MS = { warmup: 60e3, review: 300e3, check: 180e3, new: 240e3, tones: 180e3, recall: 120e3 };
+const EST = { "4.8": 8e3, "4.3": 10e3, "4.4": 8e3, "4.1": 30e3, "4.2": 12e3, "4.9": 25e3 };
+const SAY_REVIEW_MAX = 4, REVIEW_MAX = 30;
 
-/* ---------- утилиты ---------- */
-const $ = (s, r = document) => r.querySelector(s);
-const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
-const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-const DAY = 86400000, MIN = 60000;
-const shuffle = a => { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
-const pick = a => a[Math.floor(Math.random() * a.length)];
-const wait = ms => new Promise(r => setTimeout(r, ms));
-// день начинается в 4 утра — поздние занятия засчитываются в тот же день
-const dayKey = (t = Date.now()) => { const d = new Date(t - 4 * 3600000); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); };
-const dayStart = (t = Date.now()) => { const d = new Date(t - 4 * 3600000); d.setHours(4, 0, 0, 0); return d.getTime(); };
-const fmtNum = n => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, "\u2009");
-const hhmm = t => { const d = new Date(t); return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); };
-const plural = (n, a, b, c) => { const m = n % 10, h = n % 100; return m === 1 && h !== 11 ? a : m >= 2 && m <= 4 && (h < 12 || h > 14) ? b : c; };
-const standalone = () => !!(window.navigator.standalone || (window.matchMedia && matchMedia("(display-mode: standalone)").matches));
-const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-function toast(msg, ms){ const el = $("#toast"); el.textContent = msg; el.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => el.hidden = true, ms || 2400); }
-
-/* ---------- значки ---------- */
-const I = {
-  play:'<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 9.5v5a1 1 0 0 0 1 1h3.2l4.3 3.6a.6.6 0 0 0 1-.46V5.36a.6.6 0 0 0-1-.46L7.2 8.5H4a1 1 0 0 0-1 1z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.3 5.8a9 9 0 0 1 0 12.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
-  turtle:'<svg viewBox="0 0 32 32" fill="currentColor" aria-hidden="true"><path d="M5.5 20.5C5.5 14.7 10.2 10 16 10s10.5 4.7 10.5 10.5z"/><path d="M24.5 17.2h3v3.3h-3z"/><circle cx="28" cy="17" r="2.8"/><rect x="8" y="19.5" width="4.6" height="5.2" rx="2"/><rect x="19.4" y="19.5" width="4.6" height="5.2" rx="2"/><path d="M6 18.8 2.4 21.4l4.2-.2z"/><path d="M11 12.8l2.6 4h4.8l2.6-4M13.6 16.8 12.2 20.4M18.4 16.8l1.4 3.6" fill="none" stroke="var(--card)" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>',
-  mic:'<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>',
-  check:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
-  cross:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>',
-  close:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>',
-  fire:'<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12.6 2.2c.3 2.6-.8 4.3-2.3 5.9C8.6 9.9 7 11.8 7 14.6A5 5 0 0 0 12 20a5 5 0 0 0 5-5.2c0-1.6-.6-2.9-1.4-4-.2 1.3-.9 2.3-2 2.7.6-3.3-.2-7.8-1-11.3z"/></svg>',
-  star:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5l2.6 5.3 5.8.8-4.2 4.1 1 5.8L12 16.8l-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z"/></svg>',
-  chev:'<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>',
-  ear:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8.5a6 6 0 0 1 12 0c0 3.5-3 4.5-3 7.5a3 3 0 0 1-5.2 2"/><path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 1.5-1.5 2-1.5 3.5"/></svg>',
-  wave:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7h4l4 10h4l4-10h2"/></svg>',
-  speak:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>',
-  coin:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9 8l3 4 3-4M12 12v5M9 13h6M9 15.5h6"/></svg>',
-  pairs:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 9h3l3 6h2M13 9h3l3 6h3"/></svg>',
-  similar:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="9" cy="12" r="5.5"/><circle cx="15" cy="12" r="5.5"/></svg>',
-  share:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7.5 7.5 12 3l4.5 4.5M6 11H5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-8a1 1 0 0 0-1-1h-1"/></svg>'
-};
-const stroke = s => s.replace("<svg ", '<svg fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" ');
+const $ = (s, r) => (r || document).querySelector(s);
+const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  if (attrs) for (const k in attrs) {
+    const v = attrs[k];
+    if (v == null || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k === "text") el.textContent = v;
+    else if (k === "html") el.innerHTML = v;
+    else if (k === "test") el.setAttribute("data-test", v);
+    else if (k.startsWith("on") && typeof v === "function") el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v === true ? "" : String(v));
+  }
+  for (const c of kids.flat(9)) if (c != null && c !== false) el.append(c.nodeType ? c : String(c));
+  return el;
+}
+const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const pad2 = n => (n < 10 ? "0" : "") + n;
+const errText = e => String((e && (e.name ? e.name + ": " : "") + (e.message || "")) || e).slice(0, 200);
+function dayNum(t) { const d = new Date(t == null ? Date.now() : t); return Math.round(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / DAY_MS); }
+function dayStr(n) { const d = new Date(n * DAY_MS); return d.getUTCFullYear() + "-" + pad2(d.getUTCMonth() + 1) + "-" + pad2(d.getUTCDate()); }
+function hhmm(t) { const d = new Date(t); return pad2(d.getHours()) + ":" + pad2(d.getMinutes()); }
+function whenText(t) {
+  const dn = dayNum() - dayNum(t), s = dayStr(dayNum(t));
+  return (dn === 0 ? "сегодня" : dn === 1 ? "вчера" : s.slice(8) + "." + s.slice(5, 7)) + ", " + hhmm(t);
+}
+function plural(n, a, b, c) { const m = n % 10, mm = n % 100; return m === 1 && mm !== 11 ? a : m >= 2 && m <= 4 && (mm < 10 || mm >= 20) ? b : c; }
+function hashNum(s) { let x = 2166136261; for (let i = 0; i < s.length; i++) { x ^= s.charCodeAt(i); x = Math.imul(x, 16777619); } return x >>> 0; }
+function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+const rid = () => Math.random().toString(36).slice(2, 10);
+const DATE_RU = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
+const WEEK_RU = ["воскресенье", "понедельник", "вторник", "среда", "четверг", "пятница", "суббота"];
 
 /* ---------- пиньинь и тоны ---------- */
-const V = "aeiouüvāáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜ";
-// слог пиньиня; «儿» после n/ng (yìdiǎnr, yàngr) — часть слога
-const SYL = new RegExp("(?:zh|ch|sh|[bpmfdtnlgkhjqxrzcsyw])?[" + V + "]+(?:ngr?(?![" + V + "])|nr?(?![" + V + "])|r(?![" + V + "]))?", "gi");
-const TONE = {}; "āēīōūǖ".split("").forEach(c => TONE[c] = 1); "áéíóúǘ".split("").forEach(c => TONE[c] = 2); "ǎěǐǒǔǚ".split("").forEach(c => TONE[c] = 3); "àèìòùǜ".split("").forEach(c => TONE[c] = 4);
+const VOW = "aeiouüvāáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜ";
+const SYL = new RegExp("(?:zh|ch|sh|[bpmfdtnlgkhjqxrzcsyw])?[" + VOW + "]+(?:ngr?(?![" + VOW + "])|nr?(?![" + VOW + "])|r(?![" + VOW + "]))?", "gi");
+const TONE = {};
+"āēīōūǖ".split("").forEach(c => TONE[c] = 1); "áéíóúǘ".split("").forEach(c => TONE[c] = 2);
+"ǎěǐǒǔǚ".split("").forEach(c => TONE[c] = 3); "àèìòùǜ".split("").forEach(c => TONE[c] = 4);
 const sylTone = s => { for (const c of s.toLowerCase()) if (TONE[c]) return TONE[c]; return 0; };
-const baseOf = s => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/ü|v/g, "u");
-function py(text, hideable){
-  let out = "", last = 0; text = String(text || "");
-  text.replace(SYL, (m, i) => { out += esc(text.slice(last, i)) + '<span class="s' + sylTone(m) + '">' + esc(m) + "</span>"; last = i + m.length; return m; });
-  return '<span class="py' + (hideable ? " hideable" : "") + '">' + out + esc(text.slice(last)) + "</span>";
+const baseOf = s => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/ü|v/g, "u");
+function sylls(py) { return (String(py || "").normalize("NFC").match(SYL) || []).map(s => ({ s, b: baseOf(s), t: sylTone(s) })); }
+const tonesOf = py => sylls(py).map(x => x.t);
+function pyHTML(py) {
+  let out = "", last = 0; const text = String(py || "").normalize("NFC");
+  text.replace(SYL, (m, i) => { out += esc(text.slice(last, i)) + '<span class="t' + sylTone(m) + '">' + esc(m) + "</span>"; last = i + m.length; return m; });
+  return out + esc(text.slice(last));
 }
-function sylls(text){ return (String(text || "").match(SYL) || []).map(s => ({b: baseOf(s), t: sylTone(s), s})); }
-// контур тона по пятиступенчатой шкале Чжао: 1 — 55, 2 — 35, 3 — 214, 4 — 51
-const Y = l => 20 - (l - 1) * 4;
-const CONTOUR = {1:[[3,Y(5)],[18,Y(5)]], 2:[[3,Y(3)],[18,Y(5)]], 3:[[3,Y(2)],[10,Y(1)],[18,Y(4)]], 4:[[3,Y(5)],[18,Y(1)]]};
-function glyph(t){
-  const staff = '<line class="staff" x1="21.5" y1="4" x2="21.5" y2="20" stroke-width="1.2"/>';
-  if (!t) return '<svg class="tg" viewBox="0 0 24 24" aria-hidden="true">' + staff + '<circle cx="11" cy="15" r="2.4" fill="currentColor"/></svg>';
-  return '<svg class="tg" viewBox="0 0 24 24" aria-hidden="true">' + staff + '<polyline class="c" points="' + CONTOUR[t].map(p => p.join(",")).join(" ") + '"/></svg>';
+const CONT = { 1: "4,6 20,6", 2: "4,17 20,5", 3: "4,8 9,18 15,18 20,8", 4: "4,5 20,18" };
+function glyph(t) {
+  return t ? '<svg class="tg" viewBox="0 0 24 24" aria-hidden="true"><polyline points="' + CONT[t] + '"/></svg>'
+    : '<svg class="tg" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13" r="3" fill="currentColor"/></svg>';
 }
-const TONE_NAME = {1:"1-й · ровный", 2:"2-й · вверх", 3:"3-й · низкий", 4:"4-й · вниз", 0:"лёгкий"};
-const comboLabel = t => t.map(x => x || "лёгкий").join(" + ");
-function hzBig(item){
-  const clean = String(item.hz).replace(/[，。？！、\s…·/?!,.]/g, "");
-  const chars = Array.from(clean);
-  if (chars.length && chars.length <= 4 && clean === item.hz.replace(/[？！?!。]/g, "")) return `<div class="cells n${chars.length}">${chars.map(c => `<div class="cell"><span>${esc(c)}</span></div>`).join("")}</div>`;
-  return `<span class="hz ${chars.length > 5 ? "long" : ""}">${esc(item.hz)}</span>`;
-}
-const isLong = hz => Array.from(String(hz)).length > 3;
+const toneName = t => t ? t + "-й" : "лёгкий";
+function tonesHTML(arr) { return arr.map(t => '<span class="tn t' + t + '">' + glyph(t) + "<b>" + toneName(t) + "</b></span>").join('<span class="plus">+</span>'); }
 
-/* ---------- содержимое ---------- */
-let C = {decks:[], cards:[], tones:[], prices:[], units:[], audio:{}, dialogs:[], sounds:[], plan:null};
-const ITEM = new Map(), LESSON = new Map(), UNIT_OF = new Map(), DLG = new Map(), SND = new Map();
-function indexContent(){
-  ITEM.clear(); LESSON.clear(); UNIT_OF.clear(); DLG.clear(); SND.clear();
-  (C.dialogs || []).forEach(d => DLG.set(d.id, d));
-  (C.sounds || []).forEach(g => SND.set(g.id, g));
-  C.cards.forEach(c => ITEM.set(c.id, c));
-  C.tones.forEach(s => s.items.forEach(it => ITEM.set(it.id, Object.assign({set: s.key, deck: "tones"}, it))));
-  C.prices.forEach(p => ITEM.set(p.id, Object.assign({ru: fmtNum(p.n) + " юаней", deck: "prices"}, p)));
-  C.units.forEach(u => u.lessons.forEach(l => { LESSON.set(l.id, l); UNIT_OF.set(l.id, u); }));
+/* ---------- содержимое (data/words.json) ---------- */
+let C = null, LESSONS = [], BY_LESSON = {}, PAIRS = [];
+const W = id => C && C.w[id];
+function indexContent(data) {
+  C = data; LESSONS = []; BY_LESSON = {};
+  for (const b of C.books) for (const l of b.lessons) LESSONS.push(Object.assign({ book: b.id, bookTitle: b.short || b.title }, l));
+  for (const id in C.w) (BY_LESSON[C.w[id].l] = BY_LESSON[C.w[id].l] || []).push(id);
+  // «тот же слог — другой тон»: слова с одинаковым пиньинем без тонов и разными тонами
+  const groups = {};
+  for (const id in C.w) {
+    const w = C.w[id]; if (w.k === "q" || !w.s || !Object.keys(w.s).length) continue;
+    const ss = sylls(w.py); if (!ss.length || ss.length > 2) continue;
+    const key = ss.map(x => x.b).join(" ");
+    (groups[key] = groups[key] || []).push(id);
+  }
+  PAIRS = [];
+  for (const k in groups) {
+    const g = groups[k];
+    for (let i = 0; i < g.length; i++) for (let j = i + 1; j < g.length; j++) {
+      const a = W(g[i]), b = W(g[j]);
+      if (tonesOf(a.py).join() !== tonesOf(b.py).join() && a.ru !== b.ru) PAIRS.push([g[i], g[j]]);
+    }
+  }
 }
-function srcOf(item){
-  const f = item.sprite ? item.sprite.replace(/^audio\//, "") : item.id + ".mp3";
-  return "audio/" + f + "?h=" + ((C.audio || {})[f] || VERSION);
+const lessonOf = lid => LESSONS.find(l => l.id === lid);
+const lessonWords = lid => BY_LESSON[lid] || [];
+const isActive = id => W(id) && W(id).k === "a";
+const bookLessons = bid => LESSONS.filter(l => l.book === bid);
+function hasClip(id, voice) { const w = W(id) || (C && C.x[id]); return !!(w && w.s && (voice ? w.s[voice] : (w.s.f || w.s.m))); }
+function clipOf(id, voice) {
+  const w = W(id) || (C && C.x[id]); if (!w || !w.s) return null;
+  return voice ? w.s[voice] || null : w.s.f || w.s.m || null;
 }
 
-/* ---------- звук ---------- */
-const player = new Audio(); player.preload = "auto"; player.setAttribute("playsinline", "");
-let playToken = 0, seqToken = 0, actxObj = null;
-function actx(){ if (!actxObj) { const AC = window.AudioContext || window.webkitAudioContext; actxObj = AC ? new AC() : null; } return actxObj; }
-document.addEventListener("touchend", function unlock(){ const c = actx(); if (c && c.state !== "running") c.resume().catch(() => {}); }, {passive: true});
-function clearPlayer(){ player.onended = player.onerror = player.onplaying = player.ontimeupdate = null; }
-// inSeq — звук внутри цепочки (диалог, повтор за диктором): саму цепочку не обрывать
-function stopAudio(inSeq){ playToken++; if (!inSeq) seqToken++; clearPlayer(); try { player.pause(); } catch (e) {} if (!inSeq) $$(".playing").forEach(b => b.classList.remove("playing")); }
-function setSrc(src){ if (player.dataset.src !== src) { player.src = src; player.dataset.src = src; } }
-// слова уроков лежат одним файлом на урок: играем кусок от a до b
-function playSprite(item, rate, token){
-  const a = item.a || 0, b = item.b || 0;
-  return new Promise(res => {
-    let timer = 0, started = false, closed = false;
-    const end = ok => { if (closed) return; closed = true; clearTimeout(timer); if (token === playToken) { clearPlayer(); try { player.pause(); } catch (e) {} } res(ok); };
-    clearPlayer();
-    player.onerror = () => end(false);
-    player.onplaying = () => {
-      if (started) return; started = true;
-      if (Math.abs(player.currentTime - a) > .25) { try { player.currentTime = a; } catch (e) {} }
-      timer = setTimeout(() => end(true), (b - a) / rate * 1000 + 60);
-    };
-    player.ontimeupdate = () => { if (started && player.currentTime >= b + .05) end(true); };
-    try { setSrc(srcOf(item)); } catch (e) { return end(false); }
-    player.playbackRate = rate; player.defaultPlaybackRate = rate;
-    try { player.currentTime = a; } catch (e) {}
-    try { const pr = player.play(); if (pr && pr.catch) pr.catch(() => end(false)); } catch (e) { end(false); }
-  });
-}
-function playFile(src, rate, token){
-  return new Promise(res => {
-    clearPlayer();
-    const end = ok => { if (token === playToken) clearPlayer(); res(ok); };
-    player.onended = () => end(true); player.onerror = () => end(false);
-    try {
-      setSrc(src); player.currentTime = 0; player.playbackRate = rate; player.defaultPlaybackRate = rate;
-      const pr = player.play(); if (pr && pr.catch) pr.catch(() => end(false));
-    } catch (e) { end(false); }
-  });
-}
-// сказать слово; промис закрывается, когда звук доиграл
-function say(item, opts = {}){
-  stopAudio(opts.inSeq); const token = playToken;
-  const rate = opts.slow ? .7 : (S.settings.slowVoice ? .85 : 1);
-  if (opts.btn) opts.btn.classList.add("playing");
-  const p = item.sprite ? playSprite(item, rate, token) : playFile(srcOf(item), rate, token);
-  return p.then(ok => { if (opts.btn) opts.btn.classList.remove("playing"); return token === playToken && ok; });
-}
-function playBlob(url){ stopAudio(); const token = playToken; return playFile(url, 1, token); }
-// звук «верно / неверно» — синтез, без файлов
-function sfx(ok){
-  if (!S.settings.sfx) return; const c = actx(); if (!c) return;
-  try {
-    if (c.state !== "running") c.resume();
-    const t = c.currentTime + .02;
-    (ok ? [[784, 0], [1175, .1]] : [[233, 0], [185, .13]]).forEach(([f, d]) => {
-      const o = c.createOscillator(), g = c.createGain();
-      o.type = ok ? "sine" : "triangle"; o.frequency.value = f;
-      g.gain.setValueAtTime(.0001, t + d); g.gain.exponentialRampToValueAtTime(ok ? .22 : .18, t + d + .015); g.gain.exponentialRampToValueAtTime(.0001, t + d + (ok ? .28 : .32));
-      o.connect(g); g.connect(c.destination); o.start(t + d); o.stop(t + d + .4);
+/* ---------- журнал и состояние: IndexedDB «zh2» (log — каждый ответ сразу, kv — снимок состояния и занятие) ---------- */
+const DB = {
+  db: null, mem: null,
+  open() {
+    return new Promise(ok => {
+      let done = false; const fin = v => { if (!done) { done = true; ok(v); } };
+      try {
+        const r = indexedDB.open("zh2", 1);
+        r.onupgradeneeded = () => { const d = r.result; d.createObjectStore("log", { autoIncrement: true }); d.createObjectStore("kv"); };
+        r.onsuccess = () => { DB.db = r.result; DB.db.onversionchange = () => { try { DB.db.close(); } catch (e) {} }; fin(true); };
+        r.onerror = () => fin(false); // не уходим молча «в память»: запуск покажет «Память телефона не открылась»
+        setTimeout(() => fin(false), 4000);
+      } catch (e) { fin(false); }
     });
-  } catch (e) {}
-}
+  },
+  reopen() { // запись не прошла (iOS: «соединение с базой потеряно» после долгого фона) — новое соединение
+    return new Promise((ok, bad) => {
+      try { if (DB.db) DB.db.close(); } catch (e) {}
+      try {
+        const r = indexedDB.open("zh2", 1);
+        r.onsuccess = () => { DB.db = r.result; ok(); };
+        r.onerror = () => bad(r.error);
+        setTimeout(() => bad(new Error("база не ответила за 4 с")), 4000);
+      } catch (e) { bad(e); }
+    });
+  },
+  get(key) {
+    if (DB.mem) return Promise.resolve(DB.mem.kv[key]);
+    return new Promise((ok, bad) => { const r = DB.db.transaction("kv").objectStore("kv").get(key); r.onsuccess = () => ok(r.result); r.onerror = () => bad(r.error); });
+  },
+  /* одной транзакцией: события в журнал + снимки (st, sess). Ответ не потеряется даже при закрытии посреди записи. */
+  commit(evs, kv) {
+    if (DB.mem) {
+      const keys = evs.map(e => { DB.mem.log.push(e); return DB.mem.log.length; });
+      for (const k in kv) DB.mem.kv[k] = kv[k] === undefined ? undefined : JSON.parse(JSON.stringify(kv[k]));
+      return Promise.resolve(keys);
+    }
+    return new Promise((ok, bad) => {
+      const tx = DB.db.transaction(["log", "kv"], "readwrite"), keys = [];
+      const ls = tx.objectStore("log"), ks = tx.objectStore("kv");
+      evs.forEach((e, i) => { const r = ls.add(e); r.onsuccess = () => { keys[i] = r.result; }; });
+      for (const k in kv) { if (kv[k] == null) ks.delete(k); else ks.put(kv[k], k); }
+      tx.oncomplete = () => ok(keys);
+      tx.onerror = tx.onabort = () => bad(tx.error);
+    });
+  },
+  since(key, limit) { // события с номером > key
+    if (DB.mem) return Promise.resolve(DB.mem.log.map((v, i) => ({ k: i + 1, v })).filter(x => x.k > key).slice(0, limit || 1e9));
+    return new Promise((ok, bad) => {
+      const out = [], r = DB.db.transaction("log").objectStore("log").openCursor(IDBKeyRange.lowerBound(key, true));
+      r.onsuccess = () => { const c = r.result; if (c && out.length < (limit || 1e9)) { out.push({ k: c.key, v: c.value }); c.continue(); } else ok(out); };
+      r.onerror = () => bad(r.error);
+    });
+  },
+  count(key) {
+    if (DB.mem) return Promise.resolve(DB.mem.log.length - key);
+    return new Promise(ok => { const r = DB.db.transaction("log").objectStore("log").count(IDBKeyRange.lowerBound(key, true)); r.onsuccess = () => ok(r.result); r.onerror = () => ok(0); });
+  }
+};
 
-/* ---------- хранение ---------- */
-const LS = "zh-app-v1";
-const DEFAULTS = {goal: 30, pinyin: true, slowVoice: false, sfx: true, speak: true, recog: true};
-const S = {v: 1, srs: {}, lessons: {}, days: {}, settings: {}, env: {}, notes: null, ui: {track: "book", open: {}}, speakOffUntil: 0, updated: 0};
-try { const raw = localStorage.getItem(LS); if (raw) Object.assign(S, JSON.parse(raw)); } catch (e) {}
-S.settings = Object.assign({}, DEFAULTS, S.settings || {});
-S.ui = Object.assign({track: "book", open: {}}, S.ui || {});
-function save(){ try { localStorage.setItem(LS, JSON.stringify(S)); } catch (e) {} }
-function touch(){ S.updated = Date.now(); save(); Sync.schedule(); }
-function today(){ const k = dayKey(); return S.days[k] || (S.days[k] = {xp: 0, sec: 0, lessons: 0, reviews: 0, right: 0, wrong: 0, speak: [0, 0], words: 0}); }
-const dayActive = d => !!d && ((d.sec || 0) >= 60 || (d.lessons || 0) > 0 || (d.xp || 0) > 0);
-function streak(){
-  let n = 0, t = Date.now();
-  if (!dayActive(S.days[dayKey(t)])) t -= DAY;
-  while (dayActive(S.days[dayKey(t)])) { n++; t -= DAY; }
+/* ---------- состояние и повторение ---------- */
+let ST = null, SESS = null;
+function freshState() {
+  return { v: 1, dev: rid() + rid(), born: Date.now(), lesson: null, w: {}, days: {}, checked: {}, shown: {},
+    copy: { t: 0, upto: 0, prev: 0, rows: 0 }, set: { theme: "auto", micOff: 0, noListen: 0 }, last: null, launches: 0 };
+}
+function wrec(id) { return ST.w[id] || (ST.w[id] = { lv: -1, due: 0, f: 0, hn: 0, sn: 0, tn: 0, tr: 0, tx: 0, x: 0 }); }
+/* Применить событие журнала к состоянию. Чистая функция от событий: состояние всегда можно пересчитать из журнала. */
+function apply(e) {
+  const d = e.d != null ? e.d : dayNum(e.t);
+  if (e.k === "n") { const w = wrec(e.w); if (w.lv < 0) { w.lv = 0; w.due = d + 1; w.f = d; } return; }
+  if (e.k === "q") { ST.shown[e.w] = d; return; }
+  if (e.k === "C") { ST.checked[e.l] = [e.n, e.of, d]; return; }
+  if (e.k === "D") { const dd = ST.days[e.d] || (ST.days[e.d] = { a: 0, r: 0 }); if (!dd.done) dd.done = e.min || 1; return; }
+  if (e.k !== "a") return;
+  const day = ST.days[d] || (ST.days[d] = { a: 0, r: 0 });
+  day.a++; if (e.r === 2) day.r++;
+  if (!W(e.w)) return; // слово сняли в новой версии — ответ в журнале остаётся
+  if (e.ns) return; // ответ «без звука» (звук урока сломан) — повторение не двигаем (методист, М1)
+  const w = wrec(e.w);
+  if (e.sk === "t") { w.tn++; if (e.r === 2) w.tr++; else w.tx++; return; }    // у тона свой счёт: «слышу» и «говорю» не сбивает
+  if (e.p === "check") {                                                        // быстрая проверка: узнал → длинный срок 3–7 дней с разбросом
+    if (e.r === 2 && w.lv < 0) { w.lv = 1; w.due = d + 3 + hashNum(e.w) % 5; w.f = d; w.ck = 1; w.hn++; }
+    return;
+  }
+  if (w.lv < 0) { w.lv = 0; w.due = d + 1; w.f = d; }
+  const isDue = w.due <= d && w.f < d, before = w.lv;
+  if (e.r === 2) { if (e.sk === "s") w.sn++; else w.hn++; }
+  if (e.r === 0) { w.x++; w.lv = 0; w.due = d + 1; }                            // ошибка — в конце занятия и завтра
+  else if (isDue) {
+    if (e.r === 2) {                                                            // просроченное, отвеченное верно, — на следующий шаг
+      w.lv = Math.min(before + 1, STEPS.length - 1); w.due = d + STEPS[w.lv];
+      if (STEPS[before] >= 7) { if (e.sk === "s") w.sl = 1; else if (e.x === "4.9") w.sl = 1; else w.hl = 1; }
+    } else { w.lv = Math.max(before - 1, 0); w.due = d + STEPS[w.lv]; }        // «почти» — шаг назад
+  }
+}
+function rebuild(events) { // состояние из журнала, если снимок потерян
+  const keep = ST; ST = Object.assign(freshState(), { dev: keep.dev, born: keep.born, lesson: keep.lesson, set: keep.set, copy: keep.copy });
+  for (const x of events) apply(x.v);
+}
+const learned = id => { const w = ST.w[id]; return !!(w && w.hl && w.sl); };
+const known = id => { const w = ST.w[id]; return !!(w && (w.lv >= 1 || w.hn + w.sn > 0)); };
+const isNew = id => !ST.w[id] || ST.w[id].lv < 0;
+const micOff = () => ST.set.micOff > Date.now();
+const listenOff = () => ST.set.noListen > Date.now();
+function dueList(d) {
+  const out = [];
+  for (const id in ST.w) { const w = ST.w[id]; if (W(id) && W(id).k !== "p" && w.lv >= 0 && w.due <= d && w.f < d) out.push(id); }
+  return out.sort((a, b) => ST.w[a].due - ST.w[b].due || ST.w[a].lv - ST.w[b].lv);
+}
+function streak() {
+  const today = dayNum(); let top = today;
+  for (const k in ST.days) if (ST.days[k].done && +k > top) top = +k; // часы перевели назад — серия не рвётся
+  let d = ST.days[top] && ST.days[top].done ? top : top - 1, n = 0;
+  while (ST.days[d] && ST.days[d].done) { n++; d--; }
   return n;
 }
-const goalSec = () => (S.settings.goal || 30) * 60;
-const totalXp = () => Object.values(S.days).reduce((s, d) => s + (d.xp || 0), 0);
-
-/* ---------- интервальное повторение ---------- */
-const STEPS = [0, 1, 3, 7, 14, 30, 60, 120, 240]; // дней до следующего показа по уровню
-function srsApply(id, ok){
-  const now = Date.now(), e = S.srs[id] || (S.srs[id] = {lv: 0, due: 0, n: 0, x: 0, t: 0});
-  e.n++; e.t = now;
-  if (ok) {
-    if (!e.lv || e.due <= now) e.lv = Math.min(e.lv + 1, STEPS.length - 1);
-    e.due = dayStart(now) + STEPS[e.lv] * DAY;
-  } else { e.x++; e.lv = e.lv > 1 ? 1 : 0; e.due = now + 10 * MIN; }
-}
-function dueIds(){ const now = Date.now(); return Object.keys(S.srs).filter(id => ITEM.has(id) && S.srs[id].due <= now).sort((a, b) => S.srs[a].due - S.srs[b].due); }
-const learnedCount = () => Object.keys(S.srs).filter(id => S.srs[id].lv >= 2).length;
-const seenCount = () => Object.keys(S.srs).filter(id => ITEM.has(id)).length;
-
-/* ---------- курс ---------- */
-const TRACKS = [{id: "book", name: "Учебник"}, {id: "life", name: "Жизнь"}, {id: "sound", name: "Звуки"}];
-const lessonDone = l => ((S.lessons[l.id] || {}).n || 0) > 0;
-const unitsOf = track => C.units.filter(u => u.track === track);
-function currentLesson(track){
-  const f = S.notes && S.notes.focus;
-  if (f) { const l = LESSON.get(f) || (C.units.find(u => u.id === f) || {lessons: []}).lessons.find(x => !lessonDone(x)); if (l && UNIT_OF.get(l.id).track === track && !lessonDone(l)) return l; }
-  for (const u of unitsOf(track)) for (const l of u.lessons) if (!lessonDone(l) && !l.extra) return l;
-  return null;
+const dayDone = d => !!(ST.days[d == null ? dayNum() : d] && ST.days[d == null ? dayNum() : d].done);
+function recentAcc() {
+  let a = 0, r = 0; const d = dayNum();
+  for (let k = d - 7; k < d; k++) if (ST.days[k]) { a += ST.days[k].a || 0; r += ST.days[k].r || 0; }
+  return a >= 20 ? r / a : null;
 }
 
-/* ---------- упражнения ---------- */
-// общий запас слов для неправильных вариантов: тот же раздел, потом та же ветка курса
-function poolFor(id){
-  const it = ITEM.get(id); if (!it) return [];
-  if (it.deck === "tones" || it.deck === "prices" || it.deck === "snd") return [];
-  if (it.deck === "dlg") {
-    const lines = C.cards.filter(c => c.deck === "dlg" && c.id !== id);
-    return shuffle(lines.filter(c => c.unit === it.unit)).concat(shuffle(lines.filter(c => c.unit !== it.unit)));
+/* ---------- урок на парах и «догоняю 1上» ---------- */
+function lessonMode() { return !ST.lesson ? "none" : ST.lesson.other ? "other" : ST.lesson.catchup ? "catchup" : "lesson"; }
+const unknownActive = lid => lessonWords(lid).filter(id => isActive(id) && isNew(id));
+function catchupLesson() {
+  const ls = bookLessons("hj1");
+  for (const l of ls) if (unknownActive(l.id).length) return l.id;
+  return ls.length ? ls[ls.length - 1].id : null;
+}
+function curLesson() { const m = lessonMode(); return m === "lesson" ? ST.lesson.id : catchupLesson(); }
+function readyOf(lid) { const act = lessonWords(lid).filter(isActive); return { n: act.filter(known).length, of: act.length }; }
+const checkPool = lid => lessonWords(lid).filter(id => W(id).k !== "q" && !W(id).c && hasClip(id) && isNew(id));
+const needCheck = lid => !!lid && !ST.checked[lid] && checkPool(lid).length >= 4;
+
+function newLimit(due) {
+  let n = 5; const acc = recentAcc();
+  if (acc != null && acc < 0.7) n = 3;
+  if (due > REVIEW_MAX * 2) n = 0; else if (due > REVIEW_MAX * 1.5) n = 2;               // новые по долгу (ТЗ 4.4)
+  return n;
+}
+function planDay() {
+  const d = dayNum(), L = curLesson(), due = dueList(d), chk = needCheck(L);
+  const parts = chk && due.length < 10 ? ["warmup", "check", "new", "tones", "recall"]
+    : chk ? ["warmup", "review", "check", "tones", "recall"] : ["warmup", "review", "new", "tones", "recall"];
+  const newN = parts.includes("new") ? Math.min(newLimit(due.length), unknownActive(L || "").length + (chk ? 99 : 0)) : 0;
+  return { d, L, parts, due: due.length, review: parts.includes("review") ? Math.min(REVIEW_MAX, due.length) : 0, newN, onlyReview: newLimit(due.length) === 0 };
+}
+
+/* ---------- вопросы ---------- */
+let OFFLINE_OK = null; // без сети — только слова со скачанным звуком (заполняет audio.js)
+function playable(id) { // звук есть и не сломан (битые клипы помнит audio.js), без сети — только скачанный
+  return hasClip(id) && !SND_FAILED.has(absUrl(clipOf(id))) && (!OFFLINE_OK || navigator.onLine !== false || OFFLINE_OK.has(clipOf(id)));
+}
+function distract(id, n) {
+  const w = W(id), ss = sylls(w.py), base = ss.map(x => x.b).join(" "), f0 = ss[0] ? ss[0].b : "", ini = f0.replace(/[aeiou].*$/, "");
+  const scored = [];
+  for (const j in C.w) {
+    const v = C.w[j]; if (j === id || v.k === "q" || v.ru === w.ru) continue;
+    const vs = sylls(v.py), vb = vs.map(x => x.b).join(" ");
+    let s = Math.random();
+    if (vb === base) s += 5; else if (vs[0] && vs[0].b === f0) s += 3;
+    if (vs.length === ss.length) s += 1;
+    if (vs[0] && ini && vs[0].b.startsWith(ini)) s += 1;
+    if (v.l === w.l) s += 1;
+    scored.push([s, j]);
   }
-  let unit = null; for (const u of C.units) if (u.lessons.some(l => l.items.includes(id))) { unit = u; break; }
-  const same = unit ? [...new Set(unit.lessons.flatMap(l => l.items))] : [];
-  const track = unit ? unitsOf(unit.track).flatMap(u => u.lessons.flatMap(l => l.items)) : [];
-  const out = [], seen = new Set([id]);
-  for (const x of shuffle(same).concat(shuffle(track))) { if (seen.has(x)) continue; seen.add(x); const c = ITEM.get(x); if (c && c.ru && c.deck !== "tones" && c.deck !== "prices") out.push(c); }
+  scored.sort((a, b) => b[0] - a[0]);
+  const out = [], seen = new Set([w.ru]);
+  for (const [, j] of scored) { if (out.length >= n) break; if (!seen.has(C.w[j].ru)) { seen.add(C.w[j].ru); out.push(j); } }
   return out;
 }
-const pyKey = c => sylls(c.py).map(s => s.b + s.t).join(" ");
-function distractors(item, n, field){
-  const out = [], ru = new Set([item.ru]), hz = new Set([item.hz]), pk = new Set([pyKey(item)]);
-  for (const c of poolFor(item.id)) {
-    if (ru.has(c.ru) || hz.has(c.hz) || pk.has(pyKey(c))) continue; // одинаково звучащие (他 / 她) в варианты не берём
-    if (field === "hz" && isLong(item.hz) !== isLong(c.hz) && out.length < n - 1 && Math.random() < .6) continue;
-    out.push(c); ru.add(c.ru); hz.add(c.hz); pk.add(pyKey(c));
-    if (out.length === n) break;
-  }
-  return out;
+function q48(id, p) { const opts = shuffle([id].concat(distract(id, 3))); return { x: "4.8", w: id, p, o: opts, c: opts.indexOf(id) }; }
+function toneQ(id, p) {
+  const t = tonesOf(W(id).py), key = a => a.join(" "), right = key(t);
+  const twin = t.length === 2 && t[0] === 3 && t[1] === 3 ? "2 3" : t.length === 2 && t[0] === 2 && t[1] === 3 && (W(id).nt || "").includes("3 + 3") ? "3 3" : null;
+  const cands = [];
+  for (let i = 0; i < t.length; i++) if (t[i]) for (const v of [1, 2, 3, 4]) if (v !== t[i]) { const a = t.slice(); a[i] = v; cands.push(key(a)); }
+  const set = [right];
+  for (const c of shuffle(cands)) { if (set.length >= 4) break; if (c !== twin && !set.includes(c)) set.push(c); }
+  const opts = set.sort(); // тоны всегда по порядку 1–4, на одних местах: выбирают ухом (методист, М2)
+  return { x: "4.3", w: id, p, o: opts, c: opts.indexOf(right) };
 }
-function tokensOf(card){
-  if (/[\/…]/.test(card.hz)) return null;
-  const hz = Array.from(card.hz.replace(/[，。？！、,.?!\s]/g, ""));
-  const words = card.py.replace(/[,.?!，。？！]/g, " ").split(/\s+/).filter(Boolean), out = []; let i = 0;
-  for (const w of words) { const m = w.match(SYL) || []; const n = m.length + m.filter(x => /r$/i.test(x) && !/^[eēéěè]r$/i.test(x)).length; if (!n) return null; out.push({hz: hz.slice(i, i + n).join(""), py: w}); i += n; }
-  return i === hz.length ? out : null;
-}
-const canSpeak = item => !/[\/…]/.test(item.hz);
-const speakOn = () => S.settings.speak && Date.now() > (S.speakOffUntil || 0);
-const canType = item => sylls(item.py).length >= 1 && sylls(item.py).length <= 3 && !/[\/…]/.test(item.hz);
-
-function quizFor(id, avoid){
-  const it = ITEM.get(id), kinds = ["l2ru", "ru2zh", "l2zh"];
-  const toks = tokensOf(it);
-  if (toks && toks.length >= 3) kinds.push("build", "build");
-  if (canType(it) && it.deck !== "life" && it.deck !== "market") kinds.push("type");
-  const k = pick(kinds.filter(x => x !== avoid)) || "l2ru";
-  return {type: k, id};
-}
-function genLesson(l){
-  const q = [], ids = l.items, repeat = lessonDone(l);
-  if (l.kind === "words" || l.kind === "phrases") {
-    const first = {};
-    for (let i = 0; i < ids.length; i += 2) {
-      const chunk = ids.slice(i, i + 2);
-      if (!repeat) chunk.forEach(id => q.push({type: "intro", id}));
-      chunk.forEach(id => { const ex = {type: pick(["l2ru", "ru2zh"]), id}; first[id] = ex.type; q.push(ex); });
+const toneable = id => { const w = W(id); if (!w || w.k === "q" || w.c || w.ph) return false; /* у слов «во фразе» звучит фраза — тон слова не спросить */ const t = tonesOf(w.py); return t.length >= 1 && t.length <= 2 && t.some(x => x) && !(t.length === 1 && !t[0]); };
+function hearQ(id, p) { const w = ST.w[id]; return toneable(id) && w && w.tn > 0 && w.tr / w.tn < 0.7 && Math.random() < 0.6 ? toneQ(id, p) : q48(id, p); }
+function buildPart(p, plan, sess) {
+  const d = plan.d, L = plan.L, out = [], canSay = !micOff() && !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+  const used = new Set(); for (const pp of sess.parts) for (const q of pp.q || []) used.add(q.w);
+  const ok = id => playable(id) && !(listenOff());
+  if (p === "warmup") {
+    const pool = shuffle(Object.keys(ST.w).filter(id => W(id) && W(id).k !== "q" && ST.w[id].lv >= 1 && ST.w[id].due > d && ok(id)));
+    pool.slice(0, 3).forEach(id => out.push(q48(id, p)));
+  } else if (p === "review") {
+    let say = 0, load = 0; // «говорю» — три экрана (4.9 → 4.10 → 4.11) и ≈ 25 с: в потолке считаем за три
+    for (const id of dueList(d)) {
+      if (load >= REVIEW_MAX) break;
+      if (used.has(id)) continue;
+      const w = ST.w[id], act = isActive(id) && !W(id).c;
+      if (ok(id)) { out.push(hearQ(id, p)); load++; } // «говорю» — только в «Скажи по памяти», последним блоком: меньше звука после записи (ТЗ 7.5)
     }
-    if (ids.length >= 3) q.push({type: "match", ids: shuffle(ids).slice(0, 5)});
-    let speaks = 0;
-    shuffle(ids).forEach(id => {
-      if (speakOn() && speaks < 2 && canSpeak(ITEM.get(id)) && Math.random() < .5) { speaks++; q.push({type: "speak", id}); return; }
-      q.push(quizFor(id, first[id]));
+  } else if (p === "check") {
+    const pool = shuffle(checkPool(L).filter(ok)), act = pool.filter(isActive), rest = pool.filter(id => !isActive(id));
+    const words = act.concat(rest).slice(0, 12);
+    words.forEach(id => out.push(q48(id, p)));
+    shuffle(words.filter(toneable)).slice(0, 5).forEach(id => out.push(toneQ(id, p)));
+  } else if (p === "new") {
+    const fresh = unknownActive(L).filter(id => hasClip(id) && playable(id)).slice(0, plan.newN);
+    fresh.forEach(id => out.push({ x: "4.1", w: id, p }));
+    const passive = lessonWords(L).filter(id => W(id).k !== "a" && !(id in ST.shown) && hasClip(id) && playable(id) && (W(id).k !== "q" || W(id).ph || (W(id).ex && C.x[W(id).ex]))).slice(0, 2); // голая частица без фразы не показывается
+    passive.forEach(id => out.push({ x: "4.2", w: id, p }));
+    shuffle(fresh.slice()).forEach(id => out.push(q48(id, p)));
+  } else if (p === "tones") {
+    const seen = Object.keys(ST.w).filter(id => ST.w[id].lv >= 0 && toneable(id) && ok(id));
+    let pool = seen.length >= 6 ? seen : seen.concat(lessonWords(L).filter(id => toneable(id) && ok(id) && !seen.includes(id)));
+    pool = pool.map(id => [(ST.w[id] ? ST.w[id].tx * 2 : 0) + Math.random() * 3, id]).sort((a, b) => b[0] - a[0]).map(x => x[1]);
+    const n = Math.min(12, pool.length);
+    const cur = lessonOf(L), passed = id => { const l = lessonOf(W(id).l); return !!(l && cur && l.book === cur.book && l.n <= cur.n); };
+    const pairs = shuffle(PAIRS.filter(([a, b]) => ok(a) && ok(b) && passed(a) && passed(b) && (ST.w[a] || ST.w[b]))).slice(0, 3); // только пройденные уроки (М2)
+    pairs.forEach(([a, b]) => { const w = Math.random() < 0.5 ? a : b; const o = shuffle([a, b]); out.push({ x: "4.4", w, p, o, c: o.indexOf(w) }); });
+    pool.slice(0, Math.max(0, n - pairs.length)).forEach(id => out.push(toneQ(id, p)));
+  } else if (p === "recall") {
+    if (canSay) {
+      const today = Object.keys(ST.w).filter(id => isActive(id) && !W(id).c && !W(id).ph && ST.w[id].f === d && hasClip(id));
+      const due = Object.keys(ST.w).filter(id => isActive(id) && !W(id).c && !W(id).ph && ST.w[id].lv >= 0 && ST.w[id].f < d && hasClip(id) && !used.has(id))
+        .sort((a, b) => (ST.w[a].sn - ST.w[b].sn) || (ST.w[a].due - ST.w[b].due));
+      const pick = [];
+      for (const id of due.concat(today)) { if (pick.length >= 5) break; if (!pick.includes(id)) pick.push(id); }
+      pick.slice(0, Math.max(3, Math.min(5, pick.length))).forEach(id => out.push({ x: "4.9", w: id, p }));
+    }
+  }
+  return out;
+}
+const estMs = q => EST[q.x] || 10e3;
+
+/* ===== audio: пакеты урока в памяти телефона, один плеер, запись голоса (AudioWorklet), график тона ===== */
+const SND = "zh2-snd";
+function fetchT(url, ms, opts) {
+  const ac = window.AbortController ? new AbortController() : null;
+  const t = setTimeout(() => { try { ac && ac.abort(); } catch (e) {} }, ms);
+  return fetch(url, Object.assign({ signal: ac ? ac.signal : undefined }, opts || {})).finally(() => clearTimeout(t));
+}
+const absUrl = u => new URL(u, location.href).href;
+const SND_FAILED = new Set();
+async function fetch2(a, ms) { // клип: попытка и один повтор, дальше — «недоступен» до следующего запуска
+  let r = null;
+  try { r = await fetchT(a, ms); if (r.ok) return r; } catch (e) { if (navigator.onLine === false) throw e; }
+  await sleep(150);
+  return fetchT(a, ms);
+}
+let sndLogged = 0;
+function sndFail(u, why) { // один повтор на клип, потом «недоступен» до следующего запуска; в журнал — одна запись на клип
+  const a = absUrl(u);
+  if (SND_FAILED.has(a)) return;
+  SND_FAILED.add(a);
+  if (sndLogged++ >= 100) return;
+  const ev = { k: "E", t: Date.now(), m: "звук недоступен до перезапуска: " + a.replace(/^.*?(snd\/)/, "$1").split("?")[0] + " (" + why + ")" };
+  try { if (DB.db || DB.mem) DB.commit([ev], {}).catch(() => {}); } catch (e) {}
+}
+const Snd = {
+  have: new Set(), objs: new Map(), busy: false, prog: null,
+  async init() {
+    try { const c = await caches.open(SND); for (const r of await c.keys()) Snd.have.add(r.url); } catch (e) {}
+    OFFLINE_OK = { has: u => Snd.have.has(absUrl(u)) };
+  },
+  pend: new Map(),
+  blob(url) { // один запрос на клип за раз: касание во время автозвука ждёт тот же ответ, а не качает заново
+    const a = absUrl(url);
+    if (Snd.pend.has(a)) return Snd.pend.get(a);
+    const p = Snd.blob1(url).finally(() => Snd.pend.delete(a));
+    Snd.pend.set(a, p);
+    return p;
+  },
+  async blob1(url) {
+    const a = absUrl(url);
+    try { const c = await caches.open(SND); const r = await c.match(a); if (r) return await r.blob(); } catch (e) {}
+    if (navigator.onLine === false || SND_FAILED.has(a)) return null;
+    try {
+      const r = await fetch2(a, 9000); if (!r.ok) { sndFail(a, "HTTP " + r.status); return null; }
+      const b = await r.blob();
+      try { const c = await caches.open(SND); await c.put(a, new Response(b, { headers: { "Content-Type": "audio/mpeg" } })); Snd.have.add(a); } catch (e) {}
+      return b;
+    } catch (e) { return null; } // обрыв или таймаут — не «сломан»: попробуем, когда слово встретится снова
+  },
+  async obj(url) {
+    if (Snd.objs.has(url)) return Snd.objs.get(url);
+    const b = await Snd.blob(url); if (!b) return null;
+    const u = URL.createObjectURL(b); Snd.objs.set(url, u);
+    if (Snd.objs.size > 80) { const [k, v] = Snd.objs.entries().next().value; URL.revokeObjectURL(v); Snd.objs.delete(k); }
+    return u;
+  },
+  lessonClips(lid) {
+    const out = new Set();
+    for (const id of lessonWords(lid)) { const w = W(id); for (const v in w.s) out.add(w.s[v]); if (w.ex && C.x[w.ex]) for (const v in C.x[w.ex].s) out.add(C.x[w.ex].s[v]); }
+    return Array.from(out);
+  },
+  state(lid) { const u = Snd.lessonClips(lid); return { n: u.filter(x => Snd.have.has(absUrl(x))).length, of: u.length }; },
+  lessonsDone() { return LESSONS.filter(l => { const s = Snd.state(l.id); return s.of && s.n === s.of; }).length; },
+  totalMb() { return C.mb || Math.round(LESSONS.reduce((a, l) => a + (l.kb || 0), 0) / 102.4) / 10; },
+  async download(lids, onStep) { // качаем по одному маленькому файлу: обрыв связи не ломает пакет
+    if (Snd.busy) return false;
+    Snd.busy = true;
+    try {
+      const todo = []; for (const l of lids) for (const u of Snd.lessonClips(l)) if (!Snd.have.has(absUrl(u)) && !SND_FAILED.has(absUrl(u))) todo.push(u);
+      Snd.prog = { n: 0, of: todo.length };
+      const c = await caches.open(SND), fails = [];
+      let i = 0;
+      const worker = async () => {
+        while (i < todo.length) {
+          if (navigator.onLine === false) return;
+          const u = todo[i++];
+          try { const r = await fetch2(absUrl(u), 15000); if (r.ok) { await c.put(absUrl(u), new Response(await r.blob(), { headers: { "Content-Type": "audio/mpeg" } })); Snd.have.add(absUrl(u)); } else sndFail(u, "HTTP " + r.status); } catch (e) {} // обрыв связи — не помечаем
+          Snd.prog.n++; if (onStep) onStep(Snd.prog);
+        }
+      };
+      await Promise.all([worker(), worker(), worker(), worker()]);
+      return true;
+    } catch (e) { return false; } finally { Snd.busy = false; Snd.prog = null; }
+  },
+  forget(url) { // битый клип — из памяти телефона долой, до следующего запуска «недоступен»
+    const a = absUrl(url), o = Snd.objs.get(url);
+    if (o) { try { URL.revokeObjectURL(o); } catch (e) {} Snd.objs.delete(url); }
+    Snd.have.delete(a);
+    caches.open(SND).then(c => c.delete(a)).catch(() => {});
+  },
+  async prune() { // старые версии клипов (другой ?h=) — долой
+    try {
+      const keep = new Set(); for (const id in C.w) for (const v in C.w[id].s) keep.add(absUrl(C.w[id].s[v]));
+      for (const id in C.x) for (const v in C.x[id].s) keep.add(absUrl(C.x[id].s[v]));
+      const c = await caches.open(SND);
+      for (const r of await c.keys()) if (!keep.has(r.url)) { await c.delete(r); Snd.have.delete(r.url); }
+    } catch (e) {}
+  }
+};
+
+/* ---------- один плеер ---------- */
+function makeWav(pcm, rate) {
+  const n = pcm.length, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const s = (o, t) => { for (let i = 0; i < t.length; i++) v.setUint8(o + i, t.charCodeAt(i)); };
+  s(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); s(8, "WAVEfmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); s(36, "data"); v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) { const x = Math.max(-1, Math.min(1, pcm[i])); v.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7FFF, true); }
+  return new Blob([buf], { type: "audio/wav" });
+}
+const AC = () => window.AudioContext || window.webkitAudioContext;
+function setSession(t) { try { if (navigator.audioSession) navigator.audioSession.type = t; } catch (e) {} }
+const Player = {
+  el: null, ctx: null, tok: 0, btn: null, recDone: false, waitUntil: 0, silent: null, cur: null,
+  unlock() { // только из касания «Начать»: один <audio> и AudioContext для «дзынь»
+    const el = Player.el || (Player.el = $("#aud"));
+    try {
+      if (!Player.silent) Player.silent = URL.createObjectURL(makeWav(new Float32Array(1600), 16000));
+      if (!Player.pend) { el.src = Player.silent; el.removeAttribute("data-src"); const p = el.play(); Player.track(p); }
+    } catch (e) {}
+    try { const A = AC(); if (A && !Player.ctx) Player.ctx = new A(); if (Player.ctx && Player.ctx.state !== "running") Player.ctx.resume().catch(() => {}); } catch (e) {}
+    if (AFTER_REC === "modes") setSession("playback");
+  },
+  mark(btn, state) { if (btn && btn.isConnected !== false) btn.setAttribute("data-state", state); },
+  pend: null,
+  pause(el) { // пауза без AbortError: если play() ещё не завершился — паузим после него
+    if (!el) return;
+    const p = Player.pend, tok = Player.tok;
+    if (p) p.then(() => { if (tok === Player.tok) { try { el.pause(); } catch (e) {} } }, () => {});
+    else { try { el.pause(); } catch (e) {} }
+  },
+  stop() {
+    Player.tok++;
+    if (Player.cur) { try { Player.cur(); } catch (e) {} Player.cur = null; }
+    Player.pause(Player.el);
+    if (Player.btn) { Player.mark(Player.btn, "idle"); Player.btn = null; }
+  },
+  /* сыграть клип; вызывать прямо из касания. Возвращает "ok" | "missing" | "fail" */
+  play(url, opts) {
+    opts = opts || {};
+    Player.stop();
+    const tok = Player.tok, btn = opts.btn || null;
+    Player.btn = btn; Player.mark(btn, "playing");
+    const useWA = AFTER_REC === "stream" || (AFTER_REC === "gain2" && Player.recDone);
+    let ctx = null;
+    const prep = { dest: null, el2: null, err: null, fresh: null }; // плеер запускаем прямо в касании, звук подставим потом (как в пробе 2)
+    if (useWA) {
+      try {
+        const A = AC(); ctx = new A(); const r = ctx.resume(); if (r && r.catch) r.catch(() => {});
+        if (AFTER_REC === "stream") {
+          prep.dest = ctx.createMediaStreamDestination(); prep.el2 = $("#aud2"); prep.el2.srcObject = prep.dest.stream;
+          const pp = prep.el2.play(); if (pp && pp.catch) pp.catch(e => { prep.err = e; });
+        }
+      } catch (e) { ctx = null; }
+    }
+    if (AFTER_REC === "mr" && Player.recDone && !ctx) {
+      try { prep.fresh = new Audio(); prep.fresh.setAttribute("playsinline", ""); if (Player.silent) { prep.fresh.src = Player.silent; const pp = prep.fresh.play(); if (pp && pp.catch) pp.catch(() => {}); } } catch (e) { prep.fresh = null; }
+    }
+    const fin = res => { if (tok === Player.tok) { Player.mark(btn, res === "missing" ? "missing" : "idle"); Player.btn = null; Player.cur = null; } if (ctx) { try { ctx.close(); } catch (e) {} } return res; };
+    return (async () => {
+      if (!url) return fin("missing");
+      const u = opts.raw ? url : await Snd.obj(url);
+      if (tok !== Player.tok) return fin("stop");
+      if (!u) return fin("missing");
+      const wait = Player.waitUntil - Date.now(); if (wait > 0) await sleep(wait);
+      if (tok !== Player.tok) return fin("stop");
+      if (ctx) return fin(await Player.playWA(ctx, u, AFTER_REC === "gain2" ? 2 : 1, prep, tok));
+      const el = prep.fresh || Player.el || (Player.el = $("#aud"));
+      const res = await Player.playEl(el, u, opts.slow ? 0.7 : 1, tok);
+      if (res === "bad" && !opts.raw) { sndFail(url, "файл не играет"); Snd.forget(url); return fin("missing"); }
+      return fin(res === "bad" ? "fail" : res);
+    })().catch(() => fin("fail"));
+  },
+  track(p) {
+    if (!p || !p.then) return;
+    Player.pend = p;
+    const clear = () => { if (Player.pend === p) Player.pend = null; };
+    p.then(clear, clear);
+  },
+  async playEl(el, u, rate, tok) {
+    if (el === Player.el && Player.pend) { try { await Player.pend; } catch (e) {} } // новый src во время play() — тоже AbortError
+    if (tok !== Player.tok) return "stop";
+    return new Promise(resolve => {
+      let done = false, tm = null;
+      const end = r => { if (done) return; done = true; clearTimeout(tm); el.removeEventListener("ended", onEnd); el.removeEventListener("error", onErr); resolve(r); };
+      const onEnd = () => end("ok"), onErr = () => end("bad"); // ошибка самого файла (битый клип) — не путать с запретом play()
+      Player.cur = () => { Player.pause(el); end("stop"); };
+      el.addEventListener("ended", onEnd); el.addEventListener("error", onErr);
+      el.setAttribute("playsinline", "");
+      if (el.getAttribute("data-src") !== u) { el.src = u; el.setAttribute("data-src", u); }
+      try { el.currentTime = 0; } catch (e) {}
+      try { el.playbackRate = rate; el.defaultPlaybackRate = rate; } catch (e) {}
+      let p; try { p = el.play(); } catch (e) { end("fail"); return; }
+      if (el === Player.el) Player.track(p);
+      if (p && p.catch) p.catch(() => end(tok === Player.tok ? "fail" : "stop"));
+      tm = setTimeout(() => end("ok"), 15000);
     });
-    if (speakOn() && !speaks) { const id = ids.find(x => canSpeak(ITEM.get(x))); if (id) q.push({type: "speak", id}); }
-  } else if (l.kind === "review") {
-    const w = ids.slice().sort((a, b) => weak(b) - weak(a));
-    const take = shuffle(w.slice(0, 6).concat(shuffle(w.slice(6)).slice(0, 4)));
-    take.forEach((id, k) => { q.push(quizFor(id)); if (k === 4 && take.length >= 5) q.push({type: "match", ids: shuffle(ids).slice(0, 5)}); });
-    if (speakOn()) { const id = take.find(x => canSpeak(ITEM.get(x))); if (id) q.push({type: "speak", id}); }
-  } else if (l.kind === "tones") {
-    const sets = []; ids.forEach(id => { const it = ITEM.get(id); let s = sets.find(x => x.key === it.set); if (!s) sets.push(s = {key: it.set, ids: []}); s.ids.push(id); });
-    sets.forEach(s => { if (!repeat) q.push({type: "introTones", ids: s.ids}); shuffle(s.ids).slice(0, 3).forEach(id => q.push({type: "tone", id})); });
-    shuffle(ids).slice(0, 4).forEach(id => q.push({type: "tone", id}));
-    if (speakOn()) shuffle(ids).slice(0, 2).forEach(id => q.push({type: "speak", id}));
-  } else if (l.kind === "pairs") {
-    for (let i = 0; i < ids.length; i += 2) {
-      const chunk = ids.slice(i, i + 2);
-      if (!repeat) chunk.forEach(id => q.push({type: "introPair", id}));
-      chunk.forEach(id => q.push({type: "pair", id}));
+  },
+  async playWA(ctx, u, gain, prep, tok) {
+    const ab = await (await fetch(u)).arrayBuffer();
+    const buf = await new Promise((ok, bad) => { const p = ctx.decodeAudioData(ab, ok, bad); if (p && p.then) p.then(ok, bad); });
+    if (tok !== Player.tok) return "stop";
+    const src = ctx.createBufferSource(); src.buffer = buf; let last = src;
+    if (gain !== 1) {
+      const g = ctx.createGain(); g.gain.value = gain;
+      const lim = ctx.createDynamicsCompressor(); lim.threshold.value = -1.5; lim.knee.value = 0; lim.ratio.value = 20; lim.attack.value = 0.002; lim.release.value = 0.1;
+      src.connect(g); g.connect(lim); last = lim;
     }
-    q.push({type: "match", ids: shuffle(ids).slice(0, 5)});
-    if (speakOn()) shuffle(ids).slice(0, 2).forEach(id => q.push({type: "speak", id}));
-  } else if (l.kind === "prices") {
-    shuffle(ids).slice(0, 10).forEach(id => q.push({type: "price", id}));
-  } else if (l.kind === "dialog") {
-    // каждый диалог: послушать → ответить на вопросы → текст и повтор; потом реплики по одной
-    (l.dialogs || []).forEach(did => { const d = DLG.get(did); if (!d) return; d.qs.forEach((x, k) => q.push({type: "dlg", dlg: did, q: k})); q.push({type: "dlgText", dlg: did}); });
-    const lines = shuffle(ids.filter(id => ITEM.has(id)));
-    lines.filter(id => sylls(ITEM.get(id).py).length >= 2).slice(0, 2).forEach(id => q.push({type: "l2ru", id}));
-    const b = lines.find(id => { const t = tokensOf(ITEM.get(id)); return t && t.length >= 3 && t.length <= 7; });
-    if (b) q.push({type: "build", id: b});
-    if (speakOn()) { const sp = lines.find(id => { const n = sylls(ITEM.get(id).py).length; return n >= 2 && n <= 8 && canSpeak(ITEM.get(id)); }); if (sp) q.push({type: "speak", id: sp}); }
-  } else if (l.kind === "sounds") {
-    const g = SND.get(l.group);
-    if (g) {
-      if (!repeat) q.push({type: "introSound", group: g.id});
-      const qs = []; g.sets.forEach(row => { qs.push({type: "sound", id: pick(row), set: row}); qs.push({type: "sound", id: pick(row), set: row}); });
-      shuffle(qs).forEach(x => q.push(x));
-    }
+    let el = null;
+    if (prep.dest) { if (prep.err) return "fail"; last.connect(prep.dest); el = prep.el2; } // play() потока запрещён — честно «не сыграл»
+    else last.connect(ctx.destination);
+    src.start(ctx.currentTime + 0.05);
+    return new Promise(resolve => {
+      let done = false;
+      const end = r => { if (done) return; done = true; try { src.stop(); } catch (e) {} if (el) { try { el.pause(); el.srcObject = null; } catch (e) {} } resolve(r); };
+      Player.cur = () => end("stop");
+      src.onended = () => setTimeout(() => end("ok"), 120);
+      setTimeout(() => end("ok"), 15000);
+    });
+  },
+  ding(ok) { // короткий «дзынь» через Web Audio — при беззвучном режиме молчит, и это нормально
+    try {
+      const c = Player.ctx; if (!c || c.state !== "running") return;
+      const o = c.createOscillator(), g = c.createGain(), t = c.currentTime;
+      o.frequency.setValueAtTime(ok ? 880 : 220, t); if (ok) o.frequency.setValueAtTime(1320, t + 0.08);
+      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.18, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.25);
+      o.connect(g); g.connect(c.destination); o.start(t); o.stop(t + 0.3);
+    } catch (e) {}
   }
-  return q;
-}
-const weak = id => { const e = S.srs[id]; if (!e) return .5; return (e.x + 1) / (e.n + 2) + (e.due <= Date.now() ? .3 : 0); };
-function genReview(ids){
-  const q = [];
-  ids.forEach((id, k) => {
-    const it = ITEM.get(id);
-    if (it.deck === "tones") q.push({type: "tone", id});
-    else if (it.deck === "prices") q.push({type: "price", id});
-    else if (it.deck === "pairs") q.push(Math.random() < .5 ? {type: "pair", id} : quizFor(id));
-    else q.push(quizFor(id));
-    if (k === 5) { const m = ids.filter(x => { const c = ITEM.get(x); return c.ru && c.deck !== "tones" && c.deck !== "prices"; }); if (m.length >= 4) q.push({type: "match", ids: shuffle(m).slice(0, 5)}); }
-  });
-  if (speakOn()) { const id = ids.find(x => canSpeak(ITEM.get(x)) && ITEM.get(x).deck !== "prices"); if (id) q.push({type: "speak", id}); }
-  return q;
-}
-function genDrill(kind){
-  const tones = C.tones.flatMap(s => s.items.map(i => i.id)), pairs = C.cards.filter(c => c.deck === "pairs").map(c => c.id);
-  if (kind === "tone") return shuffle(tones).slice(0, 10).map(id => ({type: "tone", id}));
-  if (kind === "pair") return shuffle(pairs).slice(0, 10).map(id => ({type: "pair", id}));
-  if (kind === "speak") return shuffle(tones).slice(0, 3).concat(shuffle(pairs).slice(0, 4)).map(id => ({type: "speak", id}));
-  if (kind === "price") return shuffle(C.prices.map(p => p.id)).slice(0, 10).map(id => ({type: "price", id}));
-  if (kind === "sound") {
-    // чаще группы, где были ошибки или которые ещё не проходил
-    const rows = []; (C.sounds || []).forEach(g => { const L = S.lessons["snd-" + g.id]; const w = !L ? 2 : (L.acc || 100) < 90 ? 3 : 1; g.sets.forEach(r => { for (let k = 0; k < w; k++) rows.push(r); }); });
-    return shuffle(rows).slice(0, 10).map(r => ({type: "sound", id: pick(r), set: r}));
-  }
-  return [];
-}
-
-/* ---------- экран урока ---------- */
-const LS_EL = () => $("#lesson");
-let P = null; // идущий урок
-function openPlayer(queue, meta){
-  if (!queue.length) { toast("Здесь пока нечего делать"); return; }
-  stopAudio(); closeSheet();
-  P = {queue, i: 0, meta, right: 0, wrong: 0, xp: 0, miss: new Set(), seen: new Set(), speak: [0, 0], active: 0, shownAt: Date.now(), t0: Date.now()};
-  LS_EL().hidden = false; document.body.classList.toggle("nopy", !S.settings.pinyin);
-  renderEx(true);
-}
-function tickActive(){ if (!P) return; const now = Date.now(); if (!document.hidden) P.active += Math.min(now - P.shownAt, 90000); P.shownAt = now; }
-document.addEventListener("visibilitychange", () => { if (P) { if (document.hidden) tickActive(); else P.shownAt = Date.now(); } if (document.hidden) { save(); Sync.flushSoon(); } else Sync.pull(); });
-function closePlayer(){ stopAudio(); Mic.cancel(); P = null; LS_EL().hidden = true; LS_EL().innerHTML = ""; render(); }
-function askQuit(){
-  if (!P || P.i === 0) return closePlayer();
-  openSheet(`<h2>Выйти из урока?</h2><p class="muted" style="margin:8px 0 16px">Пройденное в этом уроке не засчитается.</p>
-    <div class="stack"><button class="btn primary block" data-act="stay">Продолжить урок</button><button class="btn ghost block" data-act="quit">Выйти</button></div>`,
-    {stay: closeSheet, quit: () => { closeSheet(); closePlayer(); }});
-}
-function frame(body, foot){
-  const n = P.queue.length, pct = Math.round(P.i / n * 100);
-  LS_EL().innerHTML = `<div class="ls-top"><button class="ls-close" id="quit" aria-label="Закрыть урок">${I.close}</button>
-    <div class="ls-bar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><i style="width:${pct}%"></i></div>
-    <div class="ls-xp">${P.xp ? "+" + P.xp : ""}</div></div>
-    <div class="ls-body" id="exBody">${body}</div>
-    <div class="ls-foot" id="exFoot">${foot || ""}</div>`;
-  $("#quit").onclick = askQuit;
-}
-const checkBtn = (dis, label) => `<button class="btn primary" id="check" ${dis ? "disabled" : ""}>${label || "Проверить"}</button>`;
-const listenBtns = () => `<div class="listen"><button class="speaker" id="spk" aria-label="Послушать">${I.play}</button><button class="turtle" id="slow" aria-label="Медленно">${I.turtle}</button></div>`;
-function bindListen(item){
-  const sp = $("#spk"), sl = $("#slow");
-  if (sp) sp.onclick = () => say(item, {btn: sp});
-  if (sl) sl.onclick = () => say(item, {slow: true, btn: sp});
-}
-function ansLine(it){ return `<span class="hz">${esc(it.hz)}</span> ${py(it.py)}${it.ru && it.deck !== "prices" ? `<br>${esc(it.ru)}` : ""}`; }
-
-function renderEx(first){
-  const ex = P.queue[P.i];
-  if (!ex) return finish();
-  P.shownAt = Date.now();
-  const R = RENDER[ex.type];
-  R(ex, first);
-}
-// ответ на упражнение: засчитать, показать плашку снизу
-function answer(ex, ok, opts = {}){
-  tickActive();
-  const ids = ex.ids || [ex.id];
-  if (!ex.retry && !ex.noScore) { if (ok) { P.right++; P.xp += 1; } else P.wrong++; }
-  ids.forEach(id => { P.seen.add(id); if (!ok && !ex.retry && ex.type !== "match") P.miss.add(id); });
-  if (!ok && !ex.retry && ex.type !== "match") P.queue.push(Object.assign({}, ex, {retry: true}));
-  sfx(ok || opts.level === "mid");
-  const level = opts.level || (ok ? "ok" : "no");
-  const title = level === "ok" ? pick(["Верно!", "Отлично!", "Так держать!", "Правильно!"]) : level === "mid" ? "Почти!" : "Неверно";
-  const fb = document.createElement("div");
-  fb.className = "fb " + level;
-  fb.innerHTML = `<div class="fb-title"><i>${stroke(level === "no" ? I.cross : I.check)}</i>${esc(title)}</div>
-    ${opts.html ? `<div class="fb-ans">${opts.html}</div>` : `<div style="height:12px"></div>`}
-    <button class="btn" id="next">${level === "no" ? "Понятно" : "Дальше"}</button>`;
-  LS_EL().appendChild(fb);
-  $("#exFoot").style.visibility = "hidden";
-  const nx = $("#next"); nx.focus({preventScroll: true});
-  nx.onclick = next;
-}
-function next(){ stopAudio(); tickActive(); P.i++; renderEx(); autoplay(); }
-function autoplay(){
-  if (!P) return; const ex = P.queue[P.i]; if (!ex) return;
-  const it = ex.id && ITEM.get(ex.id);
-  if (["intro", "l2ru", "l2zh", "build", "type", "tone", "pair", "price", "introPair", "speak", "sound"].includes(ex.type) && it) say(it, {btn: $("#spk")});
-  if (ex.type === "dlg" && ex.q === 0) { const d = DLG.get(ex.dlg); if (d) playDialog(d, {btn: $("#dplay")}); }
-  if (ex.type === "introTones") (async () => { for (const id of ex.ids) { const b = $(`[data-say="${id}"]`); if (!b || !P) return; const ok = await say(ITEM.get(id), {btn: b}); if (!ok) return; await wait(250); } })();
-}
-
-const RENDER = {
-  intro(ex){
-    const it = ITEM.get(ex.id);
-    frame(`<div><span class="tag-new">Новое слово</span></div>
-      <div class="big">${hzBig(it)}${py(it.py)}<span class="ru">${esc(it.ru)}</span>${it.note ? `<span class="note">${esc(it.note)}</span>` : ""}</div>
-      ${listenBtns()}`, `<button class="btn primary" id="check">Дальше</button>`);
-    bindListen(it);
-    $("#check").onclick = () => { tickActive(); P.seen.add(ex.id); next(); };
-  },
-  introPair(ex){
-    const it = ITEM.get(ex.id);
-    frame(`<div><span class="tag-new">Пара тонов</span></div>
-      <div class="big">${hzBig(it)}${py(it.py)}<span class="ru">${esc(it.ru)}</span></div>
-      <div class="opt s0" style="pointer-events:none"><div class="combo">${it.tones.map(t => `<span class="s${t}" style="color:var(--t${t})">${glyph(t)}</span>`).join("")}</div><span class="lab">${esc(comboLabel(it.tones))}${it.tones[0] === 3 && it.tones[1] === 3 ? " · звучит как 2 + 3" : ""}</span></div>
-      ${listenBtns()}`, `<button class="btn primary" id="check">Дальше</button>`);
-    bindListen(it);
-    $("#check").onclick = () => { tickActive(); P.seen.add(ex.id); next(); };
-  },
-  introTones(ex){
-    const items = ex.ids.map(id => ITEM.get(id));
-    frame(`<div class="ask">Четыре тона: ${esc(items[0].set)}<small>Нажимай и слушай, как меняется голос</small></div>
-      <div class="introtones">${items.map(it => `<button class="opt s${it.t}" data-say="${it.id}">${glyph(it.t)}<span class="hz">${esc(it.hz)}</span>${py(it.py)}<span class="lab">${esc(it.ru)}</span></button>`).join("")}</div>
-      <div class="stack small muted">${items.map(it => `<div>${glyph(it.t).replace('class="tg"', 'class="tg" style="display:inline-block;vertical-align:middle;color:var(--t' + it.t + ')"')} ${esc(TONE_NAME[it.t])}</div>`).join("")}</div>`,
-      `<button class="btn primary" id="check">Дальше</button>`);
-    $$("[data-say]").forEach(b => b.onclick = () => say(ITEM.get(b.dataset.say), {btn: b}));
-    $("#check").onclick = () => { tickActive(); ex.ids.forEach(id => P.seen.add(id)); next(); };
-  },
-  l2ru(ex){ choice(ex, "l2ru"); },
-  l2zh(ex){ choice(ex, "l2zh"); },
-  ru2zh(ex){ choice(ex, "ru2zh"); },
-  match(ex){ matchEx(ex); },
-  build(ex){ buildEx(ex); },
-  type(ex){ typeEx(ex); },
-  price(ex){ priceEx(ex); },
-  tone(ex){ toneEx(ex); },
-  pair(ex){ pairEx(ex); },
-  speak(ex){ speakEx(ex); },
-  introSound(ex){ introSoundEx(ex); },
-  sound(ex){ soundEx(ex); },
-  dlg(ex){ dlgEx(ex); },
-  dlgText(ex){ dlgTextEx(ex); }
 };
 
-function choice(ex, mode){
-  const it = ITEM.get(ex.id);
-  if (!ex.opts) ex.opts = shuffle([it].concat(distractors(it, 3, mode === "l2ru" ? "ru" : "hz"))).map(c => c.id);
-  const opts = ex.opts.map(id => ITEM.get(id));
-  const zhOpts = mode !== "l2ru", long = zhOpts && opts.some(c => isLong(c.hz));
-  const ask = mode === "l2ru" ? "Что ты услышал?<small>Выбери перевод</small>" : mode === "l2zh" ? "Что ты услышал?<small>Выбери слово</small>" : "Как сказать по-китайски?";
-  const prompt = mode === "ru2zh" ? `<div class="prompt-ru">${esc(it.ru)}</div>` : listenBtns();
-  const optHTML = c => zhOpts ? `<button class="opt" data-id="${c.id}"><span class="hz ${isLong(c.hz) && !long ? "long" : ""}">${esc(c.hz)}</span>${py(c.py, true)}</button>` : `<button class="opt" data-id="${c.id}">${esc(c.ru)}</button>`;
-  frame(`<div class="ask">${ask}</div>${prompt}<div class="${zhOpts && !long ? "grid2" : "list"}">${opts.map(optHTML).join("")}</div>`, checkBtn(true));
-  bindListen(it);
-  let sel = null;
-  $$(".opt[data-id]").forEach(b => b.onclick = () => {
-    if (P.locked) return;
-    sel = b.dataset.id; $$(".opt[data-id]").forEach(x => x.setAttribute("aria-pressed", x === b)); $("#check").disabled = false;
-    if (zhOpts && mode === "ru2zh") say(ITEM.get(sel), {});
-  });
-  $("#check").onclick = () => {
-    if (!sel) return; const ok = sel === it.id;
-    $$(".opt[data-id]").forEach(x => { x.disabled = true; if (x.dataset.id === it.id) x.classList.add("right"); else if (x.dataset.id === sel) x.classList.add("wrong"); });
-    say(it, {});
-    answer(ex, ok, {html: ansLine(it)});
-  };
-}
-
-function matchEx(ex){
-  const items = ex.ids.map(id => ITEM.get(id)).filter(c => c && c.ru);
-  if (!ex.left) { ex.left = shuffle(items.map(c => c.id)); ex.right = shuffle(items.map(c => c.id)); }
-  frame(`<div class="ask">Найди пары<small>Нажми слово, потом его перевод</small></div>
-    <div class="match"><div class="col">${ex.left.map(id => { const c = ITEM.get(id); return `<button class="opt" data-l="${id}"><span class="hz ${isLong(c.hz) ? "long" : ""}">${esc(c.hz)}</span>${py(c.py, true)}</button>`; }).join("")}</div>
-    <div class="col">${ex.right.map(id => `<button class="opt rus" data-r="${id}">${esc(ITEM.get(id).ru)}</button>`).join("")}</div></div>`, "");
-  let L = null, R = null, done = 0, bad = false;
-  const judge = () => {
-    if (!L || !R) return;
-    const bl = $(`[data-l="${L}"]`), br = $(`[data-r="${R}"]`);
-    if (L === R) {
-      sfx(true); [bl, br].forEach(b => { b.classList.add("right"); b.setAttribute("aria-pressed", "false"); setTimeout(() => b.classList.add("gone"), 220); });
-      done++; P.seen.add(L);
-      if (done === items.length) setTimeout(() => answer(Object.assign({}, ex, {retry: false}), !bad, {html: bad ? "Были ошибки — эти слова ещё повторим." : "Все пары найдены."}), 380);
-    } else {
-      sfx(false); bad = true; P.miss.add(L); P.miss.add(R);
-      [bl, br].forEach(b => { b.classList.add("shake", "wrong"); setTimeout(() => { b.classList.remove("shake", "wrong"); b.setAttribute("aria-pressed", "false"); }, 420); });
-    }
-    L = R = null;
-  };
-  $$("[data-l]").forEach(b => b.onclick = () => { $$("[data-l]").forEach(x => x.setAttribute("aria-pressed", x === b)); L = b.dataset.l; say(ITEM.get(L), {}); judge(); });
-  $$("[data-r]").forEach(b => b.onclick = () => { $$("[data-r]").forEach(x => x.setAttribute("aria-pressed", x === b)); R = b.dataset.r; judge(); });
-}
-
-function buildEx(ex){
-  const it = ITEM.get(ex.id), toks = tokensOf(it);
-  if (!toks) { ex.type = "l2ru"; return choice(ex, "l2ru"); }
-  if (!ex.bank) {
-    const extra = []; const have = new Set(toks.map(t => t.hz));
-    for (const c of poolFor(it.id)) { const t = tokensOf(c); if (!t) continue; for (const x of t) if (!have.has(x.hz) && extra.length < 2 && Math.random() < .5) { extra.push(x); have.add(x.hz); } if (extra.length >= 2) break; }
-    ex.bank = shuffle(toks.concat(extra)); ex.placed = [];
-  }
-  const draw = () => {
-    frame(`<div class="ask">Собери, что услышал<small>${esc(it.ru)}</small></div>${listenBtns()}
-      <div class="slots">${ex.placed.map((k, j) => `<button class="tile" data-slot="${j}"><span class="hz">${esc(ex.bank[k].hz)}</span>${py(ex.bank[k].py, true)}</button>`).join("")}</div>
-      <div class="bank">${ex.bank.map((t, k) => `<button class="tile ${ex.placed.includes(k) ? "used" : ""}" data-bank="${k}"><span class="hz">${esc(t.hz)}</span>${py(t.py, true)}</button>`).join("")}</div>`,
-      checkBtn(ex.placed.length !== toks.length));
-    bindListen(it);
-    $$("[data-bank]").forEach(b => b.onclick = () => { const k = +b.dataset.bank; if (ex.placed.includes(k) || ex.placed.length >= toks.length) return; ex.placed.push(k); draw(); });
-    $$("[data-slot]").forEach(b => b.onclick = () => { ex.placed.splice(+b.dataset.slot, 1); draw(); });
-    $("#check").onclick = () => {
-      const ok = ex.placed.map(k => ex.bank[k].hz).join("") === toks.map(t => t.hz).join("");
-      say(it, {}); answer(ex, ok, {html: ansLine(it)});
-    };
-  };
-  draw();
-}
-
-function typeEx(ex){
-  const it = ITEM.get(ex.id), tgt = sylls(it.py);
-  frame(`<div class="ask">Напиши пиньинь<small>Что ты услышал? Тоны можно не ставить</small></div>${listenBtns()}
-    <input class="answer" id="ans" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="например: ni hao или ni3 hao3" enterkeyhint="done">
-    <p class="hint">Цифра после слога — тон: ma1 ma2 ma3 ma4</p>`, checkBtn(true));
-  bindListen(it);
-  const inp = $("#ans"), btn = $("#check");
-  inp.oninput = () => { btn.disabled = !inp.value.trim(); };
-  inp.onkeydown = e => { if (e.key === "Enter" && inp.value.trim()) { e.preventDefault(); btn.click(); } };
-  btn.onclick = () => {
-    inp.blur();
-    const raw = inp.value.trim().toLowerCase().replace(/u:/g, "ü");
-    const letters = baseOf(raw).replace(/[^a-z]/g, "");
-    const want = tgt.map(s => s.b).join("");
-    const okLetters = letters === want;
-    let tones = (raw.match(/[0-5]/g) || []).map(Number).map(t => t === 5 ? 0 : t);
-    if (!tones.length) tones = (raw.match(SYL) || []).map(sylTone).filter(Boolean);
-    const gaveTones = tones.length > 0;
-    const okTones = !gaveTones || (tones.length === tgt.length && tones.every((t, i) => t === tgt[i].t || tgt[i].t === 0 || /[一不]/.test(it.hz)));
-    const level = okLetters ? (okTones ? "ok" : "mid") : "no";
-    answer(ex, okLetters, {level, html: ansLine(it) + (level === "mid" ? "<br>Буквы верно, тон другой." : "")});
-    say(it, {});
-  };
-  setTimeout(() => { try { inp.focus({preventScroll: true}); } catch (e) {} }, 350);
-}
-
-function priceEx(ex){
-  const it = ITEM.get(ex.id);
-  frame(`<div class="ask">Сколько стоит?<small>Послушай и впиши цифрами</small></div>${listenBtns()}
-    <input class="answer" id="ans" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="юаней" enterkeyhint="done">
-    ${it.coll ? `<p class="hint">Рыночная речь: «块» и нули в конце часто не говорят</p>` : ""}`, checkBtn(true));
-  bindListen(it);
-  const inp = $("#ans"), btn = $("#check");
-  inp.oninput = () => { btn.disabled = !inp.value.trim(); };
-  inp.onkeydown = e => { if (e.key === "Enter" && inp.value.trim()) { e.preventDefault(); btn.click(); } };
-  btn.onclick = () => {
-    inp.blur(); const n = parseInt(inp.value.replace(/\D/g, ""), 10), ok = n === it.n;
-    answer(ex, ok, {html: `<b class="num">${fmtNum(it.n)} ¥</b> — <span class="hz">${esc(it.hz)}</span> ${py(it.py)}${it.coll ? "<br>Так говорят на рынке: без «块» и без нулей в конце." : ""}`});
-  };
-}
-
-function toneEx(ex){
-  const it = ITEM.get(ex.id);
-  frame(`<div class="ask">Какой тон?<small>Послушай слог</small></div>${listenBtns()}
-    <div class="tones4">${[1, 2, 3, 4].map(t => `<button class="opt s${t}" data-t="${t}">${glyph(t)}<span class="lab">${esc(TONE_NAME[t])}</span></button>`).join("")}</div>`, checkBtn(true));
-  bindListen(it);
-  let sel = 0;
-  $$("[data-t]").forEach(b => b.onclick = () => { sel = +b.dataset.t; $$("[data-t]").forEach(x => x.setAttribute("aria-pressed", x === b)); $("#check").disabled = false; });
-  $("#check").onclick = () => {
-    const ok = sel === it.t;
-    $$("[data-t]").forEach(x => { x.disabled = true; if (+x.dataset.t === it.t) x.classList.add("right"); else if (+x.dataset.t === sel) x.classList.add("wrong"); });
-    answer(ex, ok, {html: `<span class="hz">${esc(it.hz)}</span> ${py(it.py)} — ${esc(it.ru)}<br>${esc(TONE_NAME[it.t])} тон`});
-  };
-}
-
-const COMBOS = []; [1, 2, 3, 4].forEach(a => [1, 2, 3, 4, 0].forEach(b => COMBOS.push([a, b])));
-function pairEx(ex){
-  const it = ITEM.get(ex.id), key = it.tones.join("");
-  if (!ex.opts) {
-    const others = shuffle(COMBOS.filter(c => c.join("") !== key && !(key === "33" && c.join("") === "23")));
-    const near = others.filter(c => c[0] === it.tones[0] || c[1] === it.tones[1]);
-    ex.opts = shuffle([it.tones].concat(near.slice(0, 2), others.filter(c => !near.slice(0, 2).includes(c)).slice(0, 1)));
-  }
-  frame(`<div class="ask">Какие тоны?<small>Послушай слово из двух слогов</small></div>${listenBtns()}
-    <div class="tones4">${ex.opts.map((c, k) => `<button class="opt" data-k="${k}"><div class="combo">${c.map(t => `<span style="color:var(--t${t})">${glyph(t)}</span>`).join("")}</div><span class="lab">${esc(comboLabel(c))}</span></button>`).join("")}</div>`, checkBtn(true));
-  bindListen(it);
-  let sel = -1;
-  $$("[data-k]").forEach(b => b.onclick = () => { sel = +b.dataset.k; $$("[data-k]").forEach(x => x.setAttribute("aria-pressed", x === b)); $("#check").disabled = false; });
-  $("#check").onclick = () => {
-    const pickd = ex.opts[sel].join(""), ok = pickd === key;
-    $$("[data-k]").forEach(x => { x.disabled = true; const c = ex.opts[+x.dataset.k].join(""); if (c === key) x.classList.add("right"); else if (+x.dataset.k === sel) x.classList.add("wrong"); });
-    answer(ex, ok, {html: `${ansLine(it)}<br>${esc(comboLabel(it.tones))}${key === "33" ? " — два третьих подряд звучат как 2 + 3" : ""}`});
-  };
-}
-
-/* ---------- похожие звуки ---------- */
-function introSoundEx(ex){
-  const g = SND.get(ex.group);
-  frame(`<div><span class="tag-new">Похожие звуки</span></div>
-    <div class="ask">${esc(g.key)}<small>Нажимай и сравнивай пары</small></div>
-    <p class="tip">${esc(g.tip)}</p>
-    <div class="sndrows">${g.sets.map(row => `<div class="sndrow n${row.length}">${row.map(id => { const c = ITEM.get(id); return `<button class="opt" data-say="${id}">${py(c.py)}<span class="hz">${esc(c.hz)}</span></button>`; }).join("")}</div>`).join("")}</div>`,
-    `<button class="btn primary" id="check">Дальше</button>`);
-  $$("[data-say]").forEach(b => b.onclick = () => say(ITEM.get(b.dataset.say), {btn: b}));
-  $("#check").onclick = () => { tickActive(); next(); };
-}
-function soundEx(ex){
-  const it = ITEM.get(ex.id);
-  if (!ex.opts) ex.opts = shuffle(ex.set);
-  frame(`<div class="ask">Какой слог звучит?<small>Послушай и выбери. Тон у всех одинаковый — слушай звук</small></div>${listenBtns()}
-    <div class="sndopts n${ex.opts.length}">${ex.opts.map(id => `<button class="opt" data-id="${id}"><span class="sylbig">${py(ITEM.get(id).py)}</span></button>`).join("")}</div>`, checkBtn(true));
-  bindListen(it);
-  let sel = null;
-  $$(".opt[data-id]").forEach(b => b.onclick = () => { if (P.locked) return; sel = b.dataset.id; $$(".opt[data-id]").forEach(x => x.setAttribute("aria-pressed", x === b)); $("#check").disabled = false; });
-  $("#check").onclick = () => {
-    if (!sel) return; const ok = sel === it.id;
-    $$(".opt[data-id]").forEach(x => { x.disabled = true; if (x.dataset.id === it.id) x.classList.add("right"); else if (x.dataset.id === sel) x.classList.add("wrong"); });
-    answer(ex, ok, {html: `Звучало: ${py(it.py)} <span class="hz">${esc(it.hz)}</span> — ${esc(it.ru)}
-      <div class="cmp">${ex.opts.map(id => `<button class="btn" data-cmp="${id}">${I.play}${py(ITEM.get(id).py)}</button>`).join("")}</div>`});
-    $$("[data-cmp]").forEach(b => b.onclick = () => say(ITEM.get(b.dataset.cmp), {btn: b}));
-  };
-}
-
-/* ---------- диалоги на слух ---------- */
-// сыграть диалог целиком: реплика за репликой с паузой; любая другая кнопка звука обрывает цепочку
-async function playDialog(d, opts = {}){
-  stopAudio(); const my = seqToken, btn = opts.btn;
-  if (btn) btn.classList.add("playing");
-  for (let k = 0; k < d.lines.length; k++) {
-    const mark = $$(`[data-line="${k}"]`);
-    mark.forEach(m => m.classList.add("on"));
-    const ok = await say(ITEM.get(d.lines[k]), {slow: opts.slow, inSeq: true});
-    mark.forEach(m => m.classList.remove("on"));
-    if (!ok || my !== seqToken) break;
-    await wait(opts.slow ? 650 : 420);
-    if (my !== seqToken) break;
-  }
-  if (btn) btn.classList.remove("playing");
-}
-function dlgEx(ex){
-  const d = DLG.get(ex.dlg), qq = d.qs[ex.q];
-  if (!ex.opts) ex.opts = shuffle([qq.a].concat(qq.x));
-  frame(`<div class="ask">${ex.q === 0 && !ex.retry ? "Послушай диалог" : "Послушай ещё раз"}<small>${esc(d.title)} · ${d.lines.length} ${plural(d.lines.length, "реплика", "реплики", "реплик")}, текст — после вопросов</small></div>
-    <div class="listen"><button class="speaker" id="dplay" aria-label="Слушать диалог">${I.play}</button><button class="turtle" id="dslow" aria-label="Медленно">${I.turtle}</button></div>
-    <div class="dlgdots">${d.lines.map((id, k) => `<i class="${ITEM.get(id).who === "M" ? "m" : "f"}" data-line="${k}"></i>`).join("")}</div>
-    <div class="qtext">${esc(qq.q)}</div>
-    <div class="list">${ex.opts.map((o, k) => `<button class="opt" data-k="${k}">${esc(o)}</button>`).join("")}</div>`, checkBtn(true));
-  const pb = $("#dplay");
-  pb.onclick = () => playDialog(d, {btn: pb});
-  $("#dslow").onclick = () => playDialog(d, {btn: pb, slow: true});
-  let sel = -1;
-  $$(".list .opt").forEach(b => b.onclick = () => { if (P.locked) return; sel = +b.dataset.k; $$(".list .opt").forEach(x => x.setAttribute("aria-pressed", x === b)); $("#check").disabled = false; });
-  $("#check").onclick = () => {
-    if (sel < 0) return; stopAudio();
-    const ok = ex.opts[sel] === qq.a;
-    $$(".list .opt").forEach(x => { x.disabled = true; const o = ex.opts[+x.dataset.k]; if (o === qq.a) x.classList.add("right"); else if (+x.dataset.k === sel) x.classList.add("wrong"); });
-    answer(ex, ok, {html: `Ответ: ${esc(qq.a)}`});
-  };
-}
-function chatHTML(ids){
-  return `<div class="chat">${ids.map((id, k) => { const it = ITEM.get(id); return `<button class="bubble ${it.who === "M" ? "m" : "f"}" data-say="${id}" data-line="${k}"><span class="hz">${esc(it.hz)}</span>${py(it.py)}<span class="ru">${esc(it.ru)}</span></button>`; }).join("")}</div>`;
-}
-function dlgTextEx(ex){
-  const d = DLG.get(ex.dlg);
-  frame(`<div class="ask">Текст диалога<small>${esc(d.title)} · нажми на реплику — послушать</small></div>
-    ${chatHTML(d.lines)}
-    <div class="row wrap" style="justify-content:center"><button class="btn" id="dAll">${I.play}Весь диалог</button><button class="btn" id="dShadow">${I.speak}Повторять за диктором</button></div>`,
-    `<button class="btn primary" id="check">Дальше</button>`);
-  $$("[data-say]").forEach(b => b.onclick = () => say(ITEM.get(b.dataset.say), {btn: b}));
-  const all = $("#dAll"); all.onclick = () => playDialog(d, {btn: all});
-  $("#dShadow").onclick = () => openShadow(d.lines, d.title);
-  $("#check").onclick = () => { tickActive(); next(); };
-}
-
-/* ---------- говорить: микрофон, распознавание речи, мелодия голоса ---------- */
-const SR = window.SpeechRecognition || window.webkitSpeechRecognition || null;
+/* ---------- запись голоса ---------- */
 const Mic = {
-  cur: null,
-  ok: () => !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
-  // вызывать прямо из нажатия: iPhone разрешает запуск распознавания только так
-  start(opts){
-    this.cancel();
-    const st = {alts: [], srErr: "", micErr: "", blob: null, done: false, t0: Date.now()};
-    this.cur = st;
-    st.promise = new Promise(r => st.resolve = r);
-    if (SR && S.settings.recog) {
-      try {
-        const r = new SR(); r.lang = "zh-CN"; r.interimResults = false; r.maxAlternatives = 5; r.continuous = false;
-        r.onresult = e => { for (let i = 0; i < e.results.length; i++) { const res = e.results[i]; for (let k = 0; k < res.length; k++) st.alts.push({text: res[k].transcript, conf: res[k].confidence}); } };
-        r.onerror = e => { st.srErr = e.error || "error"; };
-        r.onend = () => { st.srEnded = true; if (!st.stopped && st.alts.length) setTimeout(() => this.stop(), 200); };
-        r.start(); st.r = r;
-      } catch (e) { st.srErr = "start: " + (e.name || e.message); }
-    } else st.srErr = SR ? "off" : "unsupported";
-    const onStart = () => { st.recording = true; st.timer = setTimeout(() => this.stop(), opts.maxMs || 5000); if (opts.onStart) opts.onStart(); };
-    if (!this.ok()) { st.micErr = "unsupported"; if (st.r) onStart(); else this._finish(st); return st; }
-    navigator.mediaDevices.getUserMedia({audio: {echoCancellation: true, noiseSuppression: true}}).then(stream => {
-      st.stream = stream;
-      if (st.stopped || st.cancelled) return this._finish(st);
-      const types = ["audio/mp4", "audio/webm;codecs=opus", "audio/webm", "audio/ogg"];
-      const mt = window.MediaRecorder && MediaRecorder.isTypeSupported ? types.find(t => MediaRecorder.isTypeSupported(t)) : "";
-      try {
-        const rec = new MediaRecorder(stream, mt ? {mimeType: mt} : undefined);
-        const chunks = [];
-        rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
-        rec.onstop = () => { st.blob = new Blob(chunks, {type: rec.mimeType || mt || "audio/mp4"}); this._finish(st); };
-        rec.start(); st.rec = rec;
-      } catch (e) { st.micErr = "recorder: " + (e.name || e.message); }
-      onStart();
-    }).catch(e => { st.micErr = e.name || String(e); if (st.r && !st.srErr) onStart(); else this._finish(st); });
-    return st;
-  },
-  stop(){
-    const st = this.cur; if (!st || st.stopped) return; st.stopped = true; st.recording = false; clearTimeout(st.timer);
-    try { if (st.r) st.r.stop(); } catch (e) {}
-    if (st.rec && st.rec.state !== "inactive") { try { st.rec.stop(); } catch (e) { this._finish(st); } }
-    else this._finish(st);
-  },
-  cancel(){ const st = this.cur; if (!st) return; st.cancelled = true; this.stop(); try { if (st.r) st.r.abort(); } catch (e) {} },
-  _finish(st){
-    if (st.done || st.finishing) return; st.finishing = true;
-    const fin = () => { if (st.done) return; st.done = true; if (st.stream) st.stream.getTracks().forEach(t => t.stop()); try { if (navigator.audioSession) navigator.audioSession.type = "auto"; } catch (e) {} st.resolve(st); };
-    if (st.r && !st.srEnded && !st.srErr) { const t0 = Date.now(); const iv = setInterval(() => { if (st.srEnded || st.srErr || Date.now() - t0 > 1800) { clearInterval(iv); fin(); } }, 100); }
-    else fin();
+  stopNow: null, recording: false,
+  async record(maxMs, onLevel) {
+    if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) throw { reason: "no-mic", err: "нет mediaDevices" };
+    Player.stop();
+    const t0 = performance.now(), cons = { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } };
+    if (AFTER_REC === "modes") setSession("play-and-record");
+    let stream = null, ctx = null, rate = 48000, chunks = [], levels = [], peak = 0, mr = null, mrChunks = [];
+    const stopper = new Promise(r => { Mic.stopNow = r; });
+    Mic.recording = true;
+    try {
+      if (AFTER_REC !== "mr") { const A = AC(); if (!A) throw { reason: "no-mic", err: "нет AudioContext" }; ctx = new A(); try { ctx.resume().catch(() => {}); } catch (e) {} }
+      const g = navigator.mediaDevices.getUserMedia(cons);
+      try { stream = await Promise.race([g, sleep(30000).then(() => { g.then(s => s.getTracks().forEach(t => t.stop()), () => {}); throw Object.assign(new Error("нет ответа 30 с"), { name: "AbortError" }); })]); } // разрешение пришло поздно — дорожки сразу стоп
+      catch (e) { const n = e && e.name; throw { reason: n === "NotAllowedError" || n === "SecurityError" ? "denied" : "no-mic", err: errText(e) }; }
+      if (AFTER_REC === "mr") {
+        if (!window.MediaRecorder) throw { reason: "no-mic", err: "нет MediaRecorder" };
+        mr = new MediaRecorder(stream); const stopped = new Promise(r => { mr.onstop = r; });
+        mr.ondataavailable = e => { if (e.data && e.data.size) mrChunks.push(e.data); };
+        mr.start();
+        const tick = setInterval(() => onLevel && onLevel(0.05 + Math.random() * 0.1), 60);
+        await Promise.race([sleep(maxMs), stopper]); clearInterval(tick);
+        mr.stop(); await Promise.race([stopped, sleep(3000)]);
+      } else {
+        if (ctx.state !== "running") { try { await Promise.race([ctx.resume(), sleep(1500)]); } catch (e) {} }
+        rate = ctx.sampleRate;
+        const src = ctx.createMediaStreamSource(stream), sink = ctx.createGain(); sink.gain.value = 0; sink.connect(ctx.destination);
+        let heard = false, lastLoud = 0;
+        const take = (pcm, rms, pk) => {
+          chunks.push(pcm); levels.push(rms); if (pk > peak) peak = pk; if (onLevel) onLevel(rms);
+          const now = performance.now(); // сама останавливается после ~0,8 с тишины после голоса
+          if (rms > 0.012) { heard = true; lastLoud = now; } else if (heard && now - lastLoud > 800 && Mic.stopNow) Mic.stopNow();
+        };
+        let node = null;
+        try {
+          await Promise.race([ctx.audioWorklet.addModule("worklet.js"), sleep(3000).then(() => { throw new Error("worklet за 3 с не загрузился"); })]);
+          node = new AudioWorkletNode(ctx, "rec");
+          node.port.onmessage = ev => take(ev.data.pcm, ev.data.rms, ev.data.peak);
+        } catch (e) { // запасной путь без AudioWorklet
+          node = ctx.createScriptProcessor(2048, 1, 1);
+          node.onaudioprocess = ev => { const d = new Float32Array(ev.inputBuffer.getChannelData(0)); let s = 0, pk = 0; for (const x of d) { s += x * x; const a = Math.abs(x); if (a > pk) pk = a; } take(d, Math.sqrt(s / d.length), pk); };
+        }
+        src.connect(node); node.connect(sink);
+        await Promise.race([sleep(maxMs), stopper]);
+        try { src.disconnect(); node.disconnect(); } catch (e) {}
+      }
+    } finally {
+      Mic.recording = false; Mic.stopNow = null;
+      try { stream && stream.getTracks().forEach(t => t.stop()); } catch (e) {}
+      try { ctx && ctx.close(); } catch (e) {}
+      Player.recDone = true;
+      if (AFTER_REC === "modes") { Player.waitUntil = Date.now() + 500; setTimeout(() => setSession("playback"), 450); }
+      if (AFTER_REC === "mr") Player.waitUntil = Date.now() + 2500;
+    }
+    let pcm;
+    if (mr) {
+      const blob = new Blob(mrChunks, { type: mr.mimeType || "audio/mp4" });
+      try { const d = await decodeTo(await blob.arrayBuffer()); pcm = d.data; rate = d.sr; } catch (e) { throw { reason: "silent", err: "запись не читается: " + errText(e) }; }
+      for (let i = 0; i < pcm.length; i += 2400) { let s = 0, pk = 0; const e = Math.min(pcm.length, i + 2400); for (let j = i; j < e; j++) { s += pcm[j] * pcm[j]; const a = Math.abs(pcm[j]); if (a > pk) pk = a; } levels.push(Math.sqrt(s / (e - i))); if (pk > peak) peak = pk; }
+    } else {
+      let n = 0; for (const c of chunks) n += c.length;
+      pcm = new Float32Array(n); let o = 0; for (const c of chunks) { pcm.set(c, o); o += c.length; }
+    }
+    const voiced = levels.filter(r => r > 0.006).length; // ≈ −45 дБ
+    const ms = Math.round(performance.now() - t0);
+    if (peak < 0.015 || voiced < 3) throw { reason: "silent", err: "пик " + peak.toFixed(3) + ", голос " + voiced + " кусков" };
+    return { pcm, rate, peak, voiced, ms };
   }
 };
-const Rec = {
-  cache: new Map(),
-  decode(buf){
-    const c = actx(); if (!c) return Promise.reject(new Error("no audio"));
-    return new Promise((res, rej) => { try { const p = c.decodeAudioData(buf, res, rej); if (p && p.then) p.then(res, rej); } catch (e) { rej(e); } });
-  },
-  native(item){
-    const src = srcOf(item);
-    if (!this.cache.has(src)) this.cache.set(src, fetch(src).then(r => r.arrayBuffer()).then(b => this.decode(b)).catch(() => null));
-    return this.cache.get(src).then(buf => buf ? monoOf(buf, item.sprite ? item.a : 0, item.sprite ? item.b : 0) : null);
-  }
-};
-function monoOf(buf, a, b){
-  const sr = buf.sampleRate, s0 = Math.max(0, Math.floor((a || 0) * sr)), s1 = b ? Math.min(buf.length, Math.ceil(b * sr)) : buf.length;
-  const n = Math.max(0, s1 - s0), out = new Float32Array(n), ch = buf.numberOfChannels;
-  for (let c = 0; c < ch; c++) { const d = buf.getChannelData(c); for (let i = 0; i < n; i++) out[i] += d[s0 + i] / ch; }
-  return {data: out, sr};
+function decodeTo(ab) {
+  const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  const oc = new OAC(1, 16000, 16000);
+  return new Promise((ok, bad) => { const p = oc.decodeAudioData(ab, ok, bad); if (p && p.then) p.then(ok, bad); })
+    .then(buf => ({ data: buf.getChannelData(0).slice(), sr: buf.sampleRate }));
 }
-// высота голоса каждые 10 мс (метод YIN), в полутонах; null — тишина или шум
-function pitchTrack(sig){
-  if (!sig || !sig.data.length) return [];
-  const k = Math.max(1, Math.round(sig.sr / 16000)), fs = sig.sr / k, n = Math.floor(sig.data.length / k);
-  const x = new Float32Array(n); for (let i = 0; i < n; i++) { let t = 0; for (let j = 0; j < k; j++) t += sig.data[i * k + j]; x[i] = t / k; }
-  const W = Math.round(fs * .032), hop = Math.round(fs * .01), tMin = Math.floor(fs / 500), tMax = Math.ceil(fs / 65);
+
+/* ---------- высота голоса (YIN) и график ---------- */
+function pitchTrack(data, sr) {
+  if (!data || !data.length) return [];
+  const k = Math.max(1, Math.round(sr / 16000)), fs = sr / k, n = Math.floor(data.length / k);
+  const x = new Float32Array(n); for (let i = 0; i < n; i++) { let t = 0; for (let j = 0; j < k; j++) t += data[i * k + j]; x[i] = t / k; }
+  const Wn = Math.round(fs * 0.032), hop = Math.round(fs * 0.01), tMin = Math.floor(fs / 500), tMax = Math.ceil(fs / 65);
   const rms = []; let maxR = 0;
-  for (let st = 0; st + W + tMax < n; st += hop) { let e = 0; for (let i = 0; i < W; i++) e += x[st + i] * x[st + i]; const r = Math.sqrt(e / W); rms.push(r); if (r > maxR) maxR = r; }
+  for (let st = 0; st + Wn + tMax < n; st += hop) { let e = 0; for (let i = 0; i < Wn; i++) e += x[st + i] * x[st + i]; const r = Math.sqrt(e / Wn); rms.push(r); if (r > maxR) maxR = r; }
   const d = new Float32Array(tMax + 2), out = [];
   for (let f = 0, st = 0; f < rms.length; f++, st += hop) {
-    if (rms[f] < maxR * .12) { out.push(null); continue; }
+    if (rms[f] < maxR * 0.12) { out.push(null); continue; }
     let run = 0; d[0] = 1;
-    for (let tau = 1; tau <= tMax; tau++) { let t = 0; for (let i = 0; i < W; i++) { const v = x[st + i] - x[st + i + tau]; t += v * v; } run += t; d[tau] = run ? t * tau / run : 1; }
+    for (let tau = 1; tau <= tMax; tau++) { let t = 0; for (let i = 0; i < Wn; i++) { const v = x[st + i] - x[st + i + tau]; t += v * v; } run += t; d[tau] = run ? t * tau / run : 1; }
     let tau = -1;
-    for (let t = tMin; t <= tMax; t++) if (d[t] < .15) { while (t + 1 <= tMax && d[t + 1] < d[t]) t++; tau = t; break; }
+    for (let t = tMin; t <= tMax; t++) if (d[t] < 0.15) { while (t + 1 <= tMax && d[t + 1] < d[t]) t++; tau = t; break; }
     if (tau < 1) { out.push(null); continue; }
     const a = d[tau - 1], b = d[tau], c = tau + 1 <= tMax ? d[tau + 1] : b, den = a + c - 2 * b;
     out.push(12 * Math.log2(fs / (tau + (den ? (a - c) / (2 * den) : 0)) / 100));
   }
   return out;
 }
-function contour(fr){
+function contour(fr) {
   const v = fr.slice(), all = v.filter(x => x != null).sort((a, b) => a - b);
   if (all.length < 6) return null;
   const med = all[all.length >> 1];
@@ -773,716 +685,916 @@ function contour(fr){
   const seg = m.slice(s, e + 1), vv = seg.filter(x => x != null).sort((a, b) => a - b), md = vv[vv.length >> 1];
   return seg.map(x => x == null ? null : x - md);
 }
-function resample(pts, n){
-  const idx = []; pts.forEach((p, i) => { if (p != null) idx.push(i); });
-  const out = [];
-  for (let k = 0; k < n; k++) {
-    const t = k / (n - 1) * (pts.length - 1); let lo = null, hi = null;
-    for (const i of idx) { if (i <= t) lo = i; if (i >= t) { hi = i; break; } }
-    if (lo == null) lo = hi; if (hi == null) hi = lo;
-    out.push(hi === lo ? pts[lo] : pts[lo] + (pts[hi] - pts[lo]) * (t - lo) / (hi - lo));
-  }
-  return out;
+const REF = new Map();
+async function refContour(url) {
+  if (REF.has(url)) return REF.get(url);
+  let c = null;
+  try { const b = await Snd.blob(url); if (b) { const d = await decodeTo(await b.arrayBuffer()); c = contour(pitchTrack(d.data, d.sr)); } } catch (e) {}
+  REF.set(url, c); return c;
 }
-function compareMel(nat, you){
-  const n = 32, a = resample(nat, n), b = resample(you, n), ma = a.reduce((x, y) => x + y, 0) / n, mb = b.reduce((x, y) => x + y, 0) / n;
-  let e = 0; for (let i = 0; i < n; i++) { const dd = (a[i] - ma) - (b[i] - mb); e += dd * dd; }
-  const rmse = Math.sqrt(e / n), dir = arr => arr.slice(-6).reduce((x, y) => x + y, 0) / 6 - arr.slice(0, 6).reduce((x, y) => x + y, 0) / 6;
-  const range = arr => Math.max(...arr) - Math.min(...arr), dn = dir(a), dy = dir(b), rn = range(a), ry = range(b);
-  let hint = "";
-  if (dn > 2.5 && dy < 1) hint = "У диктора голос в конце идёт вверх, у тебя — нет.";
-  else if (dn < -2.5 && dy > -1) hint = "У диктора голос в конце падает, у тебя — нет.";
-  else if (rn < 2.5 && ry > 4.5) hint = "У диктора голос ровный, у тебя скачет.";
-  else if (rn > 3 && ry < rn * .5) hint = "Мелодия плоская: говори шире — выше и ниже, как диктор.";
-  return {rmse, hint, level: rmse <= 1.8 ? "ok" : rmse <= 3.2 ? "mid" : "no"};
-}
-function melodySVG(nat, you){
-  const W = 300, H = 110, pad = 8, lim = 8;
+function graphSVG(ref, me, syl) {
+  const Wd = 320, Ht = 118, pad = 10, lim = 8;
   const line = (pts, cls) => {
     if (!pts || pts.length < 2) return "";
     const n = pts.length, segs = []; let cur = [];
-    pts.forEach((p, i) => { if (p == null) { if (cur.length > 1) segs.push(cur); cur = []; return; } const x = pad + i / (n - 1) * (W - 2 * pad), y = H / 2 - Math.max(-lim, Math.min(lim, p)) / lim * (H / 2 - pad); cur.push(x.toFixed(1) + "," + y.toFixed(1)); });
+    const m = Math.max(2.5, ...pts.filter(x => x != null).map(Math.abs)); // шкала под каждый клип: контур виден, даже если голос «ровный» (Н2)
+    pts.forEach((p, i) => { if (p == null) { if (cur.length > 1) segs.push(cur); cur = []; return; } const x = pad + i / (n - 1) * (Wd - 2 * pad), y = (Ht - 18) / 2 - Math.max(-m, Math.min(m, p)) / m * ((Ht - 18) / 2 - pad); cur.push(x.toFixed(1) + "," + y.toFixed(1)); });
     if (cur.length > 1) segs.push(cur);
-    return segs.map(sg => `<polyline class="${cls}" vector-effect="non-scaling-stroke" points="${sg.join(" ")}"/>`).join("");
+    return segs.map(sg => '<polyline class="' + cls + '" points="' + sg.join(" ") + '"/>').join("");
   };
-  return `<svg class="melody" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Мелодия голоса: диктор и ты">
-    <line class="axis" x1="0" x2="${W}" y1="${H / 2}" y2="${H / 2}" stroke-dasharray="4 4" vector-effect="non-scaling-stroke"/>${line(nat, "nat")}${line(you, "you")}</svg>`;
-}
-// словарь «иероглиф → слог с тоном», чтобы сверить то, что услышало распознавание
-let HZ = null;
-function loadHz(){ return HZ ? Promise.resolve(HZ) : fetch("hz.json?v=" + VERSION).then(r => r.json()).then(d => HZ = d).catch(() => HZ = {}); }
-const DIG = "零一二三四五六七八九";
-function numZh(n){
-  if (n < 10) return DIG[n];
-  if (n < 20) return "十" + (n % 10 ? DIG[n % 10] : "");
-  if (n < 100) return DIG[Math.floor(n / 10)] + "十" + (n % 10 ? DIG[n % 10] : "");
-  if (n < 1000) { const r = n % 100; return DIG[Math.floor(n / 100)] + "百" + (r ? (r < 10 ? "零" : "") + (r < 20 && r >= 10 ? "一" + numZh(r) : numZh(r)) : ""); }
-  if (n < 10000) { const r = n % 1000; return DIG[Math.floor(n / 1000)] + "千" + (r ? (r < 100 ? "零" : "") + numZh(r) : ""); }
-  if (n < 100000000) { const r = n % 10000; return numZh(Math.floor(n / 10000)) + "万" + (r ? (r < 1000 ? "零" : "") + numZh(r) : ""); }
-  return String(n);
-}
-function heardSylls(text){
-  const t = String(text).replace(/\d+/g, m => numZh(+m)), out = [];
-  for (const ch of Array.from(t)) {
-    const p = HZ && HZ[ch]; if (!p) continue;
-    const m = /^([a-zv]+)(\d)?$/.exec(p); if (!m) continue;
-    out.push({ch, b: m[1].replace(/v/g, "u"), t: m[2] ? (+m[2] === 5 ? 0 : +m[2]) : 0});
-  }
-  return out;
-}
-function scoreHeard(item, text){
-  const clean = s => String(s).replace(/[，。？！、,.?!\s…·/]/g, "");
-  const tgt = sylls(item.py), got = heardSylls(text);
-  const exact = clean(text) === clean(item.hz);
-  const n = tgt.length, m = got.length;
-  const D = Array.from({length: n + 1}, (_, i) => Array.from({length: m + 1}, (_, j) => i + j));
-  for (let i = 1; i <= n; i++) for (let j = 1; j <= m; j++) D[i][j] = Math.min(D[i - 1][j] + 1, D[i][j - 1] + 1, D[i - 1][j - 1] + (tgt[i - 1].b === got[j - 1].b ? 0 : 1));
-  const flags = got.map(() => "no"); let toneBad = null;
-  for (let i = n, j = m; i > 0 && j > 0;) {
-    if (D[i][j] === D[i - 1][j - 1] + (tgt[i - 1].b === got[j - 1].b ? 0 : 1)) {
-      if (tgt[i - 1].b === got[j - 1].b) {
-        const tt = tgt[i - 1].t, gt = got[j - 1].t;
-        const toneOk = exact || !tt || !gt || tt === gt || /[一不]/.test(got[j - 1].ch) || (tt === 2 && gt === 3 && tgt[i] && tgt[i].t === 3);
-        flags[j - 1] = toneOk ? "ok" : "tone"; if (!toneOk) toneBad = {want: tgt[i - 1], got: got[j - 1]};
-      }
-      i--; j--;
-    } else if (D[i][j] === D[i - 1][j] + 1) i--; else j--;
-  }
-  const ratio = n ? 1 - D[n][m] / Math.max(n, m, 1) : 0;
-  const level = exact || (ratio === 1 && !toneBad) ? "ok" : ratio >= .5 ? "mid" : "no";
-  return {text, got, flags, ratio, level, toneBad, score: (exact ? 2 : 0) + ratio - (toneBad ? .2 : 0)};
-}
-async function analyze(item, st){
-  const out = {heard: null, mel: null};
-  if (st.alts.length) { await loadHz(); for (const a of st.alts) { const r = scoreHeard(item, a.text); if (!out.heard || r.score > out.heard.score) out.heard = r; } }
-  if (st.blob && st.blob.size > 600) {
-    try {
-      const buf = await Rec.decode(await st.blob.arrayBuffer());
-      const you = contour(pitchTrack(monoOf(buf, 0, 0)));
-      const natSig = await Rec.native(item), nat = natSig ? contour(pitchTrack(natSig)) : null;
-      out.mel = {you, nat, cmp: you && nat ? compareMel(nat, you) : null};
-    } catch (e) { out.melErr = String(e && e.message || e); }
-  }
-  return out;
-}
-function envNote(st, a){
-  S.env = Object.assign(S.env || {}, {
-    t: Date.now(), standalone: standalone(), ua: navigator.userAgent.slice(0, 160),
-    srApi: !!SR, mic: !st.micErr, micErr: st.micErr || "", sr: st.alts.length > 0 || (S.env || {}).sr === true, srErr: st.srErr || "",
-    rec: !!(st.blob && st.blob.size > 600), mel: !!(a && a.mel && a.mel.you)
-  });
-}
-function speakVerdict(a){
-  const h = a.heard, m = a.mel && a.mel.cmp;
-  if (h) {
-    if (h.level === "ok") return {level: "ok", text: m && m.level === "no" ? "Слова верно! Мелодию подтяни" : "Отлично!"};
-    if (h.level === "mid") return {level: "mid", text: h.toneBad ? "Почти — проверь тон" : "Почти"};
-    return {level: "no", text: "Не похоже — послушай и попробуй ещё"};
-  }
-  if (m) return {level: m.level, text: {ok: "Похоже на диктора", mid: "Почти", no: "Не похоже — послушай ещё раз"}[m.level]};
-  return {level: "none", text: "Не расслышал. Скажи громче и ближе к телефону"};
-}
-function speakEx(ex){
-  const it = ITEM.get(ex.id);
-  const syl = Math.max(1, sylls(it.py).length);
-  frame(`<div class="ask">Скажи вслух<small>Послушай, нажми на микрофон и повтори</small></div>
-    <div class="big">${hzBig(it)}${py(it.py)}${it.ru && it.deck !== "prices" ? `<span class="ru">${esc(it.ru)}</span>` : ""}</div>
-    ${listenBtns()}
-    <div class="micwrap"><button class="mic" id="mic" aria-label="Записать">${I.mic}</button><div class="mic-lab" id="micLab">Нажми и говори</div></div>
-    <div id="spOut" class="stack"></div>
-    <div style="text-align:center"><button class="linkbtn" id="cant">Не могу сейчас говорить</button></div>`,
-    `<button class="btn ghost" id="check">Пропустить</button>`);
-  bindListen(it);
-  let tries = 0, best = null, busy = false, url = "";
-  const mic = $("#mic"), lab = $("#micLab"), out = $("#spOut"), foot = $("#check");
-  const done = () => {
-    tickActive();
-    if (tries) { P.speak[1]++; if (best === "ok" || best === "mid") { P.speak[0]++; P.xp += 1; } }
-    if (url) URL.revokeObjectURL(url);
-    P.seen.add(ex.id); next();
-  };
-  foot.onclick = () => { Mic.cancel(); done(); };
-  $("#cant").onclick = () => {
-    Mic.cancel(); S.speakOffUntil = Date.now() + 60 * MIN; save();
-    P.queue = P.queue.filter((q, k) => k <= P.i || q.type !== "speak");
-    toast("Хорошо, час без заданий «скажи вслух»"); done();
-  };
-  mic.onclick = () => {
-    if (busy) return;
-    if (Mic.cur && Mic.cur.recording) { Mic.stop(); return; }
-    stopAudio();
-    const st = Mic.start({maxMs: Math.min(7000, 1800 + syl * 650), onStart: () => { mic.classList.add("rec"); lab.textContent = "Говори… нажми ещё раз, когда закончишь"; }});
-    lab.textContent = "Включаю микрофон…";
-    st.promise.then(async st2 => {
-      if (st2.cancelled || !P) return;
-      mic.classList.remove("rec"); mic.classList.add("busy"); busy = true; lab.textContent = "Слушаю…";
-      const a = await analyze(it, st2); envNote(st2, a); save();
-      busy = false; mic.classList.remove("busy"); tries++;
-      const v = speakVerdict(a);
-      if (v.level !== "none" && (!best || v.level === "ok" || (v.level === "mid" && best === "no"))) best = v.level;
-      sfx(v.level === "ok" || v.level === "mid");
-      if (url) URL.revokeObjectURL(url); url = st2.blob && st2.blob.size > 600 ? URL.createObjectURL(st2.blob) : "";
-      const h = a.heard;
-      let heard = "";
-      if (h) heard = `<div class="heard">Я услышал: <span class="hz">${h.got.length ? h.got.map((g, k) => `<span class="syl ${h.flags[k] === "ok" ? "ok" : "no"}">${esc(g.ch)}</span>`).join("") : esc(h.text)}</span>${h.toneBad ? `<br>Слог «${esc(h.toneBad.want.s)}» — нужен ${esc(TONE_NAME[h.toneBad.want.t] || "лёгкий")} тон` : ""}</div>`;
-      else if (SR && S.settings.recog && st2.srErr && st2.srErr !== "no-speech") heard = `<div class="heard small">Проверка слов не сработала (${esc(st2.srErr)}). Сравниваю только мелодию.</div>`;
-      let micHelp = "";
-      if (st2.micErr === "NotAllowedError") micHelp = `<div class="warnbox">Нет доступа к микрофону. Разреши: «Настройки» → «Safari» → «Микрофон» → «Разрешить», потом открой приложение заново.</div>`;
-      else if (st2.srErr === "service-not-allowed" || st2.srErr === "not-allowed") micHelp = `<div class="warnbox">Проверка слов выключена в iPhone. Включи: «Настройки» → «Основные» → «Клавиатура» → «Включить диктовку».</div>`;
-      const mel = a.mel && (a.mel.you || a.mel.nat);
-      out.innerHTML = `<div class="verdict ${v.level === "none" ? "no" : v.level}">${esc(v.text)}</div>${heard}
-        ${mel ? melodySVG(a.mel.nat, a.mel.you) + `<div class="legend2"><span><i style="background:var(--ink-3)"></i>диктор</span><span><i style="background:var(--t4)"></i>ты</span></div>` : ""}
-        ${a.mel && a.mel.cmp && a.mel.cmp.hint ? `<p class="hint">${esc(a.mel.cmp.hint)}</p>` : ""}${micHelp}
-        <div class="row" style="justify-content:center">${url ? `<button class="btn" id="me">${I.play}Я</button>` : ""}<button class="btn" id="nat">${I.play}Диктор</button></div>`;
-      lab.textContent = v.level === "ok" ? "Можно ещё раз или дальше" : "Нажми и попробуй ещё";
-      if (url) $("#me").onclick = () => playBlob(url);
-      $("#nat").onclick = e => say(it, {btn: e.currentTarget});
-      foot.className = "btn primary"; foot.textContent = "Дальше";
-    });
-  };
+  const labels = (syl || []).map((s, i, a) => '<text x="' + (pad + (i + 0.5) / a.length * (Wd - 2 * pad)).toFixed(0) + '" y="' + (Ht - 4) + '" text-anchor="middle">' + esc(s) + "</text>").join("");
+  return '<svg class="graph" data-test="graph" viewBox="0 0 ' + Wd + " " + Ht + '" role="img" aria-label="Линия голоса: ты и диктор">' +
+    '<line class="axis" x1="0" x2="' + Wd + '" y1="' + ((Ht - 18) / 2) + '" y2="' + ((Ht - 18) / 2) + '" stroke-dasharray="3 5"/>' + line(ref, "ref") + line(me, "me") + labels + "</svg>";
 }
 
-/* ---------- повтор за диктором: без рук — фраза, пауза на повтор, следующая ---------- */
-const SH = {ids: [], i: 0, title: "", playing: false, phase: "", said: 0, t0: 0, ms: 0};
-const shSet = () => ({gap: S.settings.shGap || 1.5, rep: S.settings.shRep || 2, slow: !!S.settings.shSlow, hide: !!S.settings.shHide});
-function openShadow(ids, title){
-  ids = (ids || []).filter(id => ITEM.has(id) && canSpeak(ITEM.get(id)));
-  if (!ids.length) { toast("Здесь пока нечего повторять"); return; }
-  stopAudio(); closeSheet();
-  if (P) tickActive();
-  Object.assign(SH, {ids, i: 0, title, playing: false, phase: "", said: 0, t0: 0, ms: 0, open: Date.now(), reveal: false});
-  $("#shadow").hidden = false;
-  renderShadow();
-}
-function shTick(){ if (SH.t0) { SH.ms += Math.min(Date.now() - SH.t0, 5 * MIN); SH.t0 = SH.playing ? Date.now() : 0; } }
-function closeShadow(){
-  SH.playing = false; stopAudio(); shTick();
-  const sec = Math.round(SH.ms / 1000);
-  if (sec >= 20 || SH.said >= 3) {
-    const d = today(); d.sec = (d.sec || 0) + sec; d.done = d.done || {}; d.done.shadow = (d.done.shadow || 0) + 1;
-    d.xp = (d.xp || 0) + Math.min(10, SH.said); touch(); Sync.flushSoon();
-  }
-  $("#shadow").hidden = true; $("#shadow").innerHTML = "";
-  if (P) P.shownAt = Date.now(); else render();
-}
-function setPhase(ph, ms){
-  SH.phase = ph;
-  const el = $("#shPhase"), card = $(".shcard"), bar = $("#shGap");
-  if (card) card.className = "shcard " + ph;
-  if (el) el.textContent = ph === "nat" ? "Слушай" : ph === "you" ? "Твоя очередь — повтори вслух" : SH.i >= SH.ids.length - 1 && SH.done ? "Готово! Можно ещё раз" : "Нажми ▶ и повторяй в паузах";
-  if (bar) { bar.style.transition = "none"; bar.style.width = "0%"; if (ph === "you" && ms) { void bar.offsetWidth; bar.style.transition = `width ${ms}ms linear`; bar.style.width = "100%"; } }
-}
-async function shadowLoop(){
-  stopAudio(); const my = seqToken; SH.playing = true; SH.done = false; SH.t0 = Date.now(); renderShadow();
-  while (SH.playing && my === seqToken) {
-    const it = ITEM.get(SH.ids[SH.i]), st = shSet();
-    for (let r = 0; r < st.rep; r++) {
-      setPhase("nat");
-      const t1 = Date.now(), ok = await say(it, {slow: st.slow, inSeq: true});
-      if (!ok || my !== seqToken || !SH.playing) return;
-      const pause = Math.round(Math.min(9000, (Date.now() - t1) * st.gap + 500));
-      setPhase("you", pause);
-      await wait(pause);
-      if (my !== seqToken || !SH.playing) return;
-    }
-    SH.said++;
-    if (SH.i < SH.ids.length - 1) { SH.i++; SH.reveal = false; renderShadow(); }
-    else { SH.playing = false; SH.done = true; shTick(); renderShadow(); sfx(true); return; }
-  }
-}
-function renderShadow(){
-  const el = $("#shadow"), n = SH.ids.length, it = ITEM.get(SH.ids[SH.i]), st = shSet();
-  const pauseI = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.2"/><rect x="14" y="5" width="4" height="14" rx="1.2"/></svg>';
-  const segBtns = (k, vals, lab) => `<div class="seg" role="group" aria-label="${lab}">${vals.map(([v, t]) => `<button data-sh="${k}" data-v="${v}" aria-pressed="${st[k] === v}">${t}</button>`).join("")}</div>`;
-  el.innerHTML = `<div class="ls-top"><button class="ls-close" id="shClose" aria-label="Закрыть">${I.close}</button>
-      <div class="ls-bar" role="progressbar" aria-valuenow="${SH.i + 1}" aria-valuemin="1" aria-valuemax="${n}"><i style="width:${Math.round((SH.i + (SH.done ? 1 : 0)) / n * 100)}%"></i></div>
-      <div class="ls-xp" style="color:var(--ink-3)">${SH.i + 1}/${n}</div></div>
-    <div class="ls-body">
-      <div class="ask">Повтор за диктором<small>${esc(SH.title)}</small></div>
-      <div class="shcard ${SH.phase}">
-        <div class="phase" id="shPhase"></div>
-        <button class="big shtext ${st.hide && !SH.reveal ? "hidetext" : ""}" id="shText" aria-label="Показать текст">${hzBig(it)}${py(it.py)}<span class="ru">${esc(it.ru || "")}</span><span class="shhint">нажми — показать текст</span></button>
-        <div class="gapbar"><i id="shGap"></i></div>
-      </div>
-      <div class="shctl"><button class="turtle" id="shPrev" aria-label="Назад"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 5h2v14H7zM19 5.5v13a.5.5 0 0 1-.8.4L10 12.4a.5.5 0 0 1 0-.8l8.2-6.5a.5.5 0 0 1 .8.4z"/></svg></button>
-        <button class="speaker" id="shPlay" aria-label="${SH.playing ? "Пауза" : "Играть"}">${SH.playing ? pauseI : I.play}</button>
-        <button class="turtle" id="shNext" aria-label="Дальше"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M15 5h2v14h-2zM5 5.5v13a.5.5 0 0 0 .8.4L14 12.4a.5.5 0 0 0 0-.8L5.8 5.1a.5.5 0 0 0-.8.4z"/></svg></button></div>
-      <p class="hint">Слушаешь фразу — в паузе говоришь вслух той же мелодией. Экран не гаси: на iPhone звук остановится.</p>
-      <div class="sec-title" style="margin-top:4px">Пауза на повтор</div>
-      ${segBtns("gap", [[1, "короче"], [1.5, "обычная"], [2, "длиннее"]], "Пауза")}
-      <div class="sec-title">Сколько раз каждую фразу</div>
-      ${segBtns("rep", [[1, "1 раз"], [2, "2 раза"], [3, "3 раза"]], "Повторов")}
-      <div class="card" style="padding:4px 16px">
-        <div class="setrow"><span class="lab">Медленнее</span><button class="switch" role="switch" aria-checked="${st.slow}" data-shsw="shSlow" aria-label="Медленнее"></button></div>
-        <div class="setrow"><span class="lab">Сначала без текста<small>Текст появится по нажатию</small></span><button class="switch" role="switch" aria-checked="${st.hide}" data-shsw="shHide" aria-label="Без текста"></button></div>
-      </div>
-    </div>
-    <div class="ls-foot"><button class="btn primary" id="shDone">${SH.done ? "Готово" : "Закончить"}</button></div>`;
-  setPhase(SH.playing ? SH.phase || "nat" : "");
-  $("#shClose").onclick = closeShadow; $("#shDone").onclick = closeShadow;
-  $("#shPlay").onclick = () => { if (SH.playing) { SH.playing = false; stopAudio(); shTick(); renderShadow(); } else { if (SH.done) { SH.i = 0; SH.done = false; } shadowLoop(); } };
-  const jump = k => { const was = SH.playing; SH.playing = false; stopAudio(); shTick(); SH.i = Math.max(0, Math.min(n - 1, SH.i + k)); SH.done = false; SH.reveal = false; if (was) shadowLoop(); else { renderShadow(); say(ITEM.get(SH.ids[SH.i]), {slow: st.slow}); } };
-  $("#shPrev").onclick = () => jump(-1); $("#shNext").onclick = () => jump(1);
-  $("#shText").onclick = () => { if (st.hide && !SH.reveal) { SH.reveal = true; $("#shText").classList.remove("hidetext"); } else if (!SH.playing) say(it, {slow: st.slow}); };
-  $$("[data-sh]").forEach(b => b.onclick = () => { S.settings["sh" + b.dataset.sh[0].toUpperCase() + b.dataset.sh.slice(1)] = +b.dataset.v; save(); $$(`[data-sh="${b.dataset.sh}"]`).forEach(x => x.setAttribute("aria-pressed", x === b)); });
-  $$("[data-shsw]").forEach(b => b.onclick = () => { const k = b.dataset.shsw; S.settings[k] = !S.settings[k]; save(); b.setAttribute("aria-checked", S.settings[k]); if (k === "shHide") { SH.reveal = false; $("#shText").classList.toggle("hidetext", S.settings[k]); } });
-}
-
-/* ---------- итог урока ---------- */
-function finish(){
-  tickActive();
-  const d = today(), sec = Math.round(P.active / 1000), meta = P.meta || {};
-  const scored = P.right + P.wrong, acc = scored ? Math.round(P.right / scored * 100) : 100;
-  let bonus = 0;
-  if (meta.lesson) { bonus = 5 + (acc >= 90 ? 5 : 0); const L = S.lessons[meta.lesson] || (S.lessons[meta.lesson] = {n: 0, best: 0}); L.n++; L.best = Math.max(L.best || 0, acc); L.last = Date.now(); L.acc = acc; d.lessons = (d.lessons || 0) + 1; }
-  else d.reviews = (d.reviews || 0) + 1;
-  const kind = meta.kind || (meta.lesson && LESSON.get(meta.lesson) ? LESSON.get(meta.lesson).kind : "");
-  if (kind) { d.done = d.done || {}; d.done[kind] = (d.done[kind] || 0) + 1; }
-  const xp = P.xp + bonus;
-  const before = d.sec || 0;
-  d.xp = (d.xp || 0) + xp; d.sec = before + sec; d.right = (d.right || 0) + P.right; d.wrong = (d.wrong || 0) + P.wrong;
-  d.speak = [(d.speak || [0, 0])[0] + P.speak[0], (d.speak || [0, 0])[1] + P.speak[1]];
-  let fresh = 0;
-  P.seen.forEach(id => { if (!ITEM.has(id) || ITEM.get(id).deck === "snd") return; if (!S.srs[id]) fresh++; srsApply(id, !P.miss.has(id)); });
-  d.words = (d.words || 0) + fresh;
-  touch(); Sync.flushSoon();
-  const goalHit = before < goalSec() && d.sec >= goalSec();
-  const mm = Math.floor(sec / 60), ss = sec % 60;
-  const cheer = acc >= 95 ? "Идеально!" : acc >= 80 ? "Отличная работа!" : acc >= 60 ? "Хорошо!" : "Сделано! Ошибки повторим";
-  LS_EL().innerHTML = `<div class="ls-body"><div class="finish">
-    <span class="hz">${acc >= 80 ? "好!" : "加油"}</span>
-    <h2>${esc(cheer)}</h2>
-    <p class="muted">${esc(meta.title || "")}</p>
-    <div class="tiles3"><div class="stat xp"><b>+${xp}</b><span>очков</span></div><div class="stat acc"><b>${acc}%</b><span>точность</span></div><div class="stat time"><b>${mm}:${String(ss).padStart(2, "0")}</b><span>время</span></div></div>
-    ${goalHit ? `<div class="warnbox" style="background:var(--good-bg)">Цель дня выполнена: ${S.settings.goal} минут. Серия — ${streak()} ${plural(streak(), "день", "дня", "дней")} подряд!</div>` : `<p class="muted small">Сегодня ${Math.floor(d.sec / 60)} из ${S.settings.goal} минут</p>`}
-    ${fresh ? `<p class="muted small">Новых слов: ${fresh}. Они придут на повторение завтра.</p>` : ""}
-  </div></div><div class="ls-foot"><button class="btn primary" id="fin">Продолжить</button></div>`;
-  sfx(true);
-  $("#fin").onclick = () => closePlayer();
-}
-
-/* ---------- нижняя шторка ---------- */
-function openSheet(html, acts){
-  const w = $("#sheet"); w.innerHTML = `<div class="sheet" role="dialog" aria-modal="true"><div class="handle"></div>${html}</div>`; w.hidden = false;
-  w.onclick = e => { if (e.target === w) closeSheet(); };
-  $$("[data-act]", w).forEach(b => b.onclick = () => (acts[b.dataset.act] || (() => {}))(b));
-}
-function closeSheet(){ const w = $("#sheet"); w.hidden = true; w.innerHTML = ""; }
-function wordRows(ids){
-  return `<div class="words">${ids.map(id => { const c = ITEM.get(id); if (!c) return ""; return `<button class="word" data-play="${id}"><span class="playmini">${I.play}</span><span><span class="hz">${esc(c.hz)}</span> ${py(c.py)}<br><span class="ru">${esc(c.ru || "")}</span>${c.check ? ` <span class="tagchk">сверить с книгой</span>` : ""}</span></button>`; }).join("")}</div>`;
-}
-function bindPlays(root){ $$("[data-play]", root).forEach(b => b.onclick = () => say(ITEM.get(b.dataset.play), {btn: $(".playmini", b)})); }
-function lessonSheet(l){
-  const u = UNIT_OF.get(l.id), done = lessonDone(l), st = S.lessons[l.id] || {};
-  const kindTxt = l.extra ? "Дополнительно — по желанию" : {words: "Новые слова", phrases: "Фразы", review: "Повторение раздела", tones: "Тоны", pairs: "Пары тонов", prices: "Цены на слух", dialog: "Диалоги на слух", sounds: "Похожие звуки"}[l.kind];
-  let list = l.kind === "review" ? `<p class="muted" style="margin:10px 0 14px">${l.items.length} ${plural(l.items.length, "слово", "слова", "слов")} раздела, сначала те, где были ошибки.</p>` : wordRows(l.items);
-  if (l.kind === "dialog") list = `<div class="words">${(l.dialogs || []).map(did => { const d = DLG.get(did); return d ? `<div class="word" style="grid-template-columns:1fr"><span><b>${esc(d.title)}</b><br><span class="ru">${d.lines.length} ${plural(d.lines.length, "реплика", "реплики", "реплик")} · ${d.qs.length} ${plural(d.qs.length, "вопрос", "вопроса", "вопросов")}</span></span></div>` : ""; }).join("")}</div>
-    <p class="small muted" style="margin-bottom:12px">Сначала только на слух, текст — после вопросов. Диалоги Claude написал из слов урока — это не тексты книги.</p>`;
-  if (l.kind === "sounds") list = `<p class="tip" style="margin:10px 0 4px">${esc((SND.get(l.group) || {}).tip || "")}</p>${wordRows(l.items)}`;
-  openSheet(`<div class="eyebrow">${esc(u.name)}${u.title ? ` · <span class="hz">${esc(u.title)}</span>` : ""}</div>
-    <h2 style="margin-top:4px">${esc(l.title)}</h2>
-    <p class="muted small" style="margin-top:4px">${esc(kindTxt)}${done ? ` · пройдено ${st.n} ${plural(st.n, "раз", "раза", "раз")}, лучший результат ${st.best}%` : ""}</p>
-    ${list}
-    ${l.extra ? `<p class="small muted" style="margin-bottom:12px">Дополнительные слова урока и слова, которых может не быть в твоём издании книги. Не обязательно — план дня их не считает.</p>` : ""}
-    ${u.book && (l.kind === "words" || l.kind === "review") ? `<p class="small muted" style="margin-bottom:12px">${esc(BOOK_NOTE)}</p>` : ""}
-    <button class="btn primary block" data-act="go">${done ? "Пройти ещё раз" : "Начать"}</button>`,
-    {go: () => startLesson(l)});
-  bindPlays($("#sheet"));
-}
-function startLesson(l){
-  const u = UNIT_OF.get(l.id);
-  const q = genLesson(l);
-  openPlayer(q, {lesson: l.id, title: u.name + " · " + l.title});
-  autoplay();
-}
-
-/* ---------- экраны ---------- */
-let tab = "learn";
-const view = () => $("#view");
-function ringSVG(frac){
-  const r = 8.5, c = 2 * Math.PI * r, f = Math.max(0, Math.min(1, frac));
-  return `<svg class="ring" viewBox="0 0 22 22" aria-hidden="true"><circle class="bgc" cx="11" cy="11" r="${r}"/><circle class="fg" cx="11" cy="11" r="${r}" stroke-dasharray="${(c * f).toFixed(1)} ${c.toFixed(1)}"/></svg>`;
-}
-function renderTop(title){
-  const s = streak(), d = S.days[dayKey()] || {}, min = Math.floor((d.sec || 0) / 60);
-  $("#top").innerHTML = `<h1>${esc(title)}</h1>
-    <span class="pillstat ${s ? "fire" : "off"}" aria-label="Серия ${s} ${plural(s, "день", "дня", "дней")}">${I.fire}${s}</span>
-    <span class="pillstat" aria-label="Сегодня ${min} из ${S.settings.goal} минут">${ringSVG((d.sec || 0) / goalSec())}${min}<span class="muted" style="font-weight:600">/${S.settings.goal}</span></span>`;
-}
-function render(){
-  $$("#tabs button").forEach(b => b.setAttribute("aria-current", b.dataset.tab === tab ? "page" : "false"));
-  const due = dueIds().length, bd = $("#dueBadge"); bd.hidden = !due; bd.textContent = due > 99 ? "99+" : due;
-  ({learn: renderLearn, review: renderReview, tones: renderTones, me: renderMe})[tab]();
-}
-function noteCard(){
-  const n = S.notes; if (!n || !n.text) return "";
-  return `<div class="note"><div class="eyebrow">Claude · ${esc(n.date || "")}</div><div style="white-space:pre-line">${esc(n.text)}</div></div>`;
-}
-/* ---------- план дня ---------- */
-const BOOK_NOTE = "Слова — по спискам из интернета, Claude их сверил. Если в твоей книге не так — пришли фото страницы «生词».";
-const doneToday = l => !!l && ((S.lessons[l.id] || {}).last || 0) >= dayStart();
-const stepDone = st => st.of === 0 || st.n >= st.of;
-function planDay(){
-  const k = dayKey(), day = ((C.plan && C.plan.days) || []).find(d => d.d === k);
-  if (day) return Object.assign({auto: false}, day);
-  // вне расписания: следующий непройденный раздел учебника и самая слабая группа звуков
-  const cur = currentLesson("book"), u = cur ? UNIT_OF.get(cur.id) : null;
-  const score = g => { const L = S.lessons["snd-" + g.id]; return L ? 100 + (L.acc || 0) : 0; };
-  const g = (C.sounds || []).slice().sort((a, b) => score(a) - score(b))[0];
-  return {d: k, units: u ? [u.id] : [], snd: g ? [g.id] : [], auto: true};
-}
-function planSteps(day){
-  const d = S.days[dayKey()] || {}, done = d.done || {}, man = d.plan || {};
-  const units = (day.units || []).map(id => C.units.find(u => u.id === id)).filter(Boolean);
-  const words = units.flatMap(u => u.lessons.filter(l => l.kind === "words" && !l.extra));
-  const dlgs = units.flatMap(u => u.lessons.filter(l => l.kind === "dialog"));
-  const snds = (day.snd || []).map(g => LESSON.get("snd-" + g)).filter(Boolean);
-  const first = ls => ls.find(l => !lessonDone(l)) || ls[0];
-  const lines = dlgs.flatMap(l => l.items), due = dueIds().length;
-  const toneOk = done.tone || done.pair || done.tones || done.pairs ? 1 : 0;
-  return [
-    {id: "snd", title: "Звуки и тоны", sub: (snds.length ? snds.map(l => l.title).join(" · ") + " и тоны" : "тоны") + " · 20 мин",
-     n: snds.filter(doneToday).length + toneOk, of: snds.length + 1,
-     go: () => { const l = snds.find(x => !doneToday(x)); if (l) return startLesson(l); openPlayer(genDrill("tone"), {title: "Какой тон?", kind: "tone"}); autoplay(); }},
-    {id: "words", title: units.length ? "Слова: " + units.map(u => u.name.toLowerCase()).join(", ") : "Слова урока", sub: "с озвучкой и микрофоном · 25 мин",
-     n: words.filter(lessonDone).length, of: words.length, go: () => { const l = first(words); if (l) startLesson(l); }},
-    {id: "dialog", title: "Диалоги на слух", sub: "послушай и ответь · 20 мин",
-     n: dlgs.filter(lessonDone).length, of: dlgs.length, go: () => { const l = first(dlgs); if (l) startLesson(l); }},
-    {id: "review", title: "Повторить слова", sub: (due ? `${due} ${plural(due, "слово ждёт", "слова ждут", "слов ждут")}` : "всё повторено") + " · 10 мин",
-     n: !due || d.reviews ? 1 : 0, of: 1, go: () => { if (!due) return toast("Всё повторено — можно дальше"); openPlayer(genReview(dueIds().slice(0, 15)), {title: "Повторение"}); autoplay(); }},
-    {id: "shadow", title: "Повтор за диктором", sub: "диалоги урока вслух · 10 мин",
-     n: done.shadow ? 1 : 0, of: 1, go: () => lines.length ? openShadow(lines, "Диалоги: " + units.map(u => u.name).join(", ")) : shadowSheet()},
-    {id: "hw", title: "Домашка курса и аудио учебника", sub: "по книге и тетради, отметь сам · 35 мин", manual: true, n: man.hw ? 1 : 0, of: 1}
-  ];
-}
-function planCard(){
-  if (!C.plan) return "";
-  const day = planDay(), steps = planSteps(day), ok = steps.filter(stepDone).length;
-  const names = (day.units || []).map(id => (C.units.find(u => u.id === id) || {}).name).filter(Boolean);
-  if (ok === steps.length && !S.ui.planOpen) return `<button class="card plan closed" id="planOpen"><i class="ck">${stroke(I.check)}</i><span class="grow"><b>План на сегодня выполнен</b><small>${ok} из ${steps.length} · так держать!</small></span>${I.chev}</button>`;
-  return `<div class="card plan">
-    <div class="plan-head"><div class="grow"><div class="eyebrow">План на сегодня · 2 часа</div><b>${esc(names.length ? names.join(" и ") : "Повторение")}</b></div><span class="plan-ring">${ringSVG(ok / steps.length)}<b>${ok}/${steps.length}</b></span></div>
-    ${day.note ? `<p class="small muted">${esc(day.note)}</p>` : ""}
-    <div class="steps">${steps.map(st => `<button class="step ${stepDone(st) ? "done" : ""}" data-step="${st.id}"><i class="ck">${stepDone(st) ? stroke(I.check) : ""}</i><span class="grow"><b>${esc(st.title)}</b><small>${esc(st.sub)}</small></span>${st.manual ? `<span class="cnt">${stepDone(st) ? "сделано" : "отметить"}</span>` : st.of > 1 ? `<span class="cnt">${Math.min(st.n, st.of)}/${st.of}</span>` : ""}</button>`).join("")}</div>
-    <div class="row" style="justify-content:space-between"><button class="linkbtn" id="planAll">Весь план</button><button class="linkbtn" id="planBad">Плохой день?</button></div>
-  </div>`;
-}
-function bindPlan(){
-  const steps = planSteps(planDay());
-  $$("[data-step]").forEach(b => b.onclick = () => {
-    const st = steps.find(x => x.id === b.dataset.step); if (!st) return;
-    if (st.manual) { const d = today(); d.plan = d.plan || {}; d.plan[st.id] = !d.plan[st.id]; touch(); renderLearn(); return; }
-    st.go();
-  });
-  const po = $("#planOpen"); if (po) po.onclick = () => { S.ui.planOpen = true; save(); renderLearn(); };
-  const pa = $("#planAll"); if (pa) pa.onclick = planSheet;
-  const pb = $("#planBad"); if (pb) pb.onclick = () => openSheet(`<h2>Плохой день</h2>
-    <p style="margin:10px 0">Минимум 30 минут — и день засчитан:</p>
-    <div class="steps"><div class="step"><i class="ck"></i><span class="grow"><b>10 минут — звуки</b><small>одна группа «Похожие звуки» или «Какой тон?»</small></span></div>
-    <div class="step"><i class="ck"></i><span class="grow"><b>10 минут — слова</b><small>один урок «Слова» или повторение</small></span></div>
-    <div class="step"><i class="ck"></i><span class="grow"><b>10 минут — на слух</b><small>один диалог или повтор за диктором в наушниках</small></span></div></div>
-    <p class="muted small" style="margin:12px 0">Главное правило — не пропускать два дня подряд.</p>
-    <button class="btn primary block" data-act="ok">Понятно</button>`, {ok: closeSheet});
-}
-function planSheet(){
-  const days = (C.plan && C.plan.days) || [], k = dayKey(), WD = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
-  const rows = days.map(d => {
-    const units = d.units.map(id => C.units.find(u => u.id === id)).filter(Boolean);
-    const ls = units.flatMap(u => u.lessons.filter(l => (l.kind === "words" && !l.extra) || l.kind === "dialog"));
-    const dn = ls.filter(lessonDone).length, full = ls.length > 0 && dn === ls.length, dt = new Date(d.d + "T12:00:00");
-    return `<div class="dayrow ${d.d === k ? "today" : ""} ${full ? "done" : ""}"><span class="dd">${dt.getDate()}.${String(dt.getMonth() + 1).padStart(2, "0")}<small>${WD[dt.getDay()]}</small></span>
-      <span class="grow"><b>${esc(units.map(u => u.name).join(" и "))}</b><small class="hz">${esc(units.map(u => u.title).join(" · "))}</small></span><span class="cnt">${full ? "✓" : dn + "/" + ls.length}</span></div>`;
-  }).join("");
-  openSheet(`<h2>${esc((C.plan && C.plan.title) || "План")}</h2>
-    <p class="small muted" style="margin:6px 0 10px">Каждый день около 2 часов: звуки → слова урока → диалоги на слух → повторение → повтор за диктором → домашка курса. После последнего дня приложение само берёт следующий урок.</p>
-    <div class="days">${rows}</div>
-    <p class="small muted" style="margin:10px 0 14px">Если на парах уже другой урок — скажи Claude номер, план сдвинется.</p>
-    <button class="btn primary block" data-act="ok">Понятно</button>`, {ok: closeSheet});
-}
-function syncHint(){
-  if (Sync.cfg() || (S.ui.syncHideUntil || 0) > Date.now()) return "";
-  return `<div class="card install"><span class="ic-sync">${stroke(I.star)}</span><div class="grow"><b>Claude пока не видит твой прогресс</b><p class="small muted" style="margin-top:4px">Подключи один раз — 3 минуты. Тогда Claude подстроит план под твои ошибки.</p><button class="btn block" id="goSync" style="margin-top:10px">Подключить</button></div><button class="ls-close" id="hideSync" aria-label="Скрыть на 3 дня">${I.close}</button></div>`;
-}
-function bindSyncHint(){
-  const g = $("#goSync"); if (g) g.onclick = () => { tab = "me"; render(); view().scrollTop = 0; setTimeout(() => { const c = $("#syncCard"); if (c) c.scrollIntoView({block: "center"}); }, 60); };
-  const h = $("#hideSync"); if (h) h.onclick = () => { S.ui.syncHideUntil = Date.now() + 3 * DAY; save(); renderLearn(); };
-}
-function shadowSheet(){
-  const day = planDay(), units = (day.units || []).map(id => C.units.find(u => u.id === id)).filter(Boolean);
-  const dl = units.flatMap(u => u.lessons.filter(l => l.kind === "dialog").flatMap(l => l.items));
-  const doneDl = C.units.filter(u => u.track === "book").flatMap(u => u.lessons.filter(l => l.kind === "dialog" && lessonDone(l)).flatMap(l => l.items));
-  const words = units.flatMap(u => u.lessons.filter(l => l.kind === "words" && !l.extra).flatMap(l => l.items));
-  const deck = k => C.cards.filter(c => c.deck === k).map(c => c.id);
-  const src = [
-    dl.length && {k: "dl", t: "Диалоги урока дня", s: units.map(u => u.name).join(", ") + ` · ${dl.length} ${plural(dl.length, "фраза", "фразы", "фраз")}`, ids: dl},
-    doneDl.length && {k: "done", t: "Все пройденные диалоги", s: `${doneDl.length} ${plural(doneDl.length, "фраза", "фразы", "фраз")} вперемешку`, ids: shuffle(doneDl)},
-    words.length && {k: "w", t: "Слова урока дня", s: `${words.length} ${plural(words.length, "слово", "слова", "слов")}`, ids: words},
-    {k: "life", t: "Фразы для жизни", s: "кафе, такси, оплата", ids: deck("life")},
-    {k: "market", t: "Фразы для рынка", s: "цены, торг, поставщик", ids: deck("market")}
-  ].filter(Boolean);
-  openSheet(`<h2>Повтор за диктором</h2><p class="small muted" style="margin:6px 0 12px">Фраза → пауза → ты повторяешь вслух той же мелодией. Можно в наушниках, без рук.</p>
-    <div class="stack">${src.map(x => `<button class="btn block srcbtn" data-act="${x.k}"><span class="grow"><b>${esc(x.t)}</b><small>${esc(x.s)}</small></span>${I.play}</button>`).join("")}</div>`,
-    Object.fromEntries(src.map(x => [x.k, () => openShadow(x.ids, x.t)])));
-}
-function renderLearn(){
-  renderTop("Учиться");
-  const track = S.ui.track, cur = currentLesson(track), curUnit = cur && UNIT_OF.get(cur.id);
-  const y = S.days[dayKey(Date.now() - DAY)], t = S.days[dayKey()];
-  const hasHistory = Object.keys(S.days).some(k => dayActive(S.days[k]));
-  let warn = "";
-  if (hasHistory && !dayActive(y) && !dayActive(t)) warn = `<div class="warnbox">Вчера пропуск. Сегодня хотя бы 10 минут — два дня подряд не пропускаем.</div>`;
-  const install = isIOS && !standalone() && !S.ui.installHidden ? `<div class="card install">${I.share}<div class="grow"><b>Поставь на экран «Домой»</b><p class="small muted" style="margin-top:4px">Внизу Safari нажми «Поделиться», потом «На экран „Домой"». Откроется как приложение и будет работать без интернета.</p></div><button class="ls-close" data-hide="install" aria-label="Скрыть">${I.close}</button></div>` : "";
-  const units = unitsOf(track);
-  const openSet = S.ui.open || {};
-  const html = units.map((u, ui) => {
-    const main = u.lessons.filter(l => !l.extra), n = main.length, dn = main.filter(lessonDone).length, isOpen = openSet[u.id] != null ? openSet[u.id] : (curUnit ? curUnit.id === u.id : ui === 0);
-    const no = track === "book" ? u.name.replace(/\D/g, "") : String(ui + 1);
-    const offs = [0, 44, 62, 44, 0, -44, -62, -44];
-    return `<section class="unit ${isOpen ? "open" : ""} ${dn === n ? "done" : ""}" data-unit="${u.id}">
-      <button class="unit-head" data-toggle="${u.id}" aria-expanded="${isOpen}">
-        <span class="unit-no">${dn === n ? stroke(I.check).replace("<svg ", '<svg width="24" height="24" ') : esc(no)}</span>
-        <span class="grow"><span class="unit-name">${esc(u.name)}</span><span class="unit-sub" style="display:block">${u.title ? `<span class="hz">${esc(u.title)}</span> · ` : ""}${dn} из ${n}</span><span class="bar"><i style="width:${Math.round(dn / n * 100)}%"></i></span></span>
-        ${I.chev}
-      </button>
-      ${isOpen ? `<div class="path">${u.lessons.map((l, k) => {
-        const done = lessonDone(l), isCur = cur && cur.id === l.id;
-        const icon = l.kind === "review" ? stroke(I.star) : done ? stroke(I.check) : String(k + 1);
-        return `<div class="node ${done ? "done" : ""} ${isCur ? "cur" : ""} ${l.extra ? "extra" : ""}" style="transform:translateX(${offs[k % offs.length]}px)">
-          ${isCur ? `<span class="startflag">${done ? "ЕЩЁ РАЗ" : "НАЧАТЬ"}</span>` : ""}
-          <button class="node-btn" data-lesson="${l.id}" aria-label="${esc(l.title)}">${icon}</button>
-          <span class="node-lab">${esc(l.title)}</span></div>`;
-      }).join("")}</div>` : ""}
-    </section>`;
-  }).join("");
-  view().innerHTML = `<div class="stack">
-    ${install}${warn}${noteCard()}${planCard()}${syncHint()}
-    <div class="seg" role="group" aria-label="Ветка курса">${TRACKS.map(tr => `<button data-track="${tr.id}" aria-pressed="${tr.id === track}">${esc(tr.name)}</button>`).join("")}</div>
-    ${cur ? `<button class="btn primary block cont" data-lesson="${cur.id}"><span>${lessonDone(cur) ? "Повторить" : "Продолжить"}</span><small>${esc(UNIT_OF.get(cur.id).name)} · ${esc(cur.title)}</small></button>` : `<div class="card">Вся ветка пройдена. Повторяй слова во вкладке «Повторить».</div>`}
-  </div>${html}<div style="height:12px"></div>`;
-  $$("[data-track]").forEach(b => b.onclick = () => { S.ui.track = b.dataset.track; save(); renderLearn(); view().scrollTop = 0; });
-  $$("[data-toggle]").forEach(b => b.onclick = () => { const id = b.dataset.toggle, sec = b.closest(".unit"); S.ui.open = S.ui.open || {}; S.ui.open[id] = !sec.classList.contains("open"); save(); renderLearn(); });
-  $$("[data-lesson]").forEach(b => b.onclick = () => lessonSheet(LESSON.get(b.dataset.lesson)));
-  $$("[data-hide]").forEach(b => b.onclick = () => { S.ui.installHidden = true; save(); renderLearn(); });
-  bindPlan(); bindSyncHint();
-}
-function renderReview(){
-  renderTop("Повторить");
-  const due = dueIds(), seen = seenCount(), learned = learnedCount();
-  const weakIds = Object.keys(S.srs).filter(id => ITEM.has(id) && S.srs[id].x > 0).sort((a, b) => weak(b) - weak(a)).slice(0, 8);
-  view().innerHTML = `<div class="stack">
-    <div class="card hero"><div class="bigno" style="color:${due.length ? "var(--accent)" : "var(--good)"}">${due.length}</div>
-      <div class="grow"><b>${due.length ? "слов ждут повторения" : "Всё повторено"}</b><p class="small muted">${due.length ? "Повторение — это то, что держит слова в памяти." : seen ? "Новые придут завтра. Можно пройти новый урок." : "Пройди первый урок — слова появятся здесь."}</p></div></div>
-    ${due.length ? `<button class="btn primary block" id="goRev">Повторить ${Math.min(due.length, 15)} ${plural(Math.min(due.length, 15), "слово", "слова", "слов")}</button>` : seen >= 4 ? `<button class="btn block" id="goWeak">Потренировать трудные слова</button>` : ""}
-    <div class="tiles3"><div class="stat"><b>${seen}</b><span>встречено</span></div><div class="stat acc"><b>${learned}</b><span>выучено</span></div><div class="stat xp"><b>${totalXp()}</b><span>очков</span></div></div>
-    ${weakIds.length ? `<div class="sec-title">Трудные слова</div><div class="card" style="padding:4px 16px">${wordRows(weakIds)}</div>` : ""}
-    ${seen ? `<button class="btn ghost block" id="allWords">Все слова, что ты прошёл (${seen})</button>` : ""}
-  </div>`;
-  const gr = $("#goRev"); if (gr) gr.onclick = () => { openPlayer(genReview(due.slice(0, 15)), {title: "Повторение"}); autoplay(); };
-  const gw = $("#goWeak"); if (gw) gw.onclick = () => { const ids = Object.keys(S.srs).filter(id => ITEM.has(id)).sort((a, b) => weak(b) - weak(a)).slice(0, 10); openPlayer(genReview(shuffle(ids)), {title: "Трудные слова"}); autoplay(); };
-  const aw = $("#allWords"); if (aw) aw.onclick = () => { const ids = Object.keys(S.srs).filter(id => ITEM.has(id) && ITEM.get(id).deck !== "prices"); openSheet(`<h2>Пройденные слова</h2>${wordRows(ids)}`, {}); bindPlays($("#sheet")); };
-  bindPlays(view());
-}
-function renderTones(){
-  renderTop("Слух");
-  const ma = C.tones[0] ? C.tones[0].items : [];
-  const combos = [];
-  [1, 2, 3, 4].forEach(a => [1, 2, 3, 4, 0].forEach(b => { const c = C.cards.find(x => x.deck === "pairs" && x.tones && x.tones[0] === a && x.tones[1] === b); if (c) combos.push(c); }));
-  view().innerHTML = `<div class="stack">
-    <div class="introtones">${ma.map(it => `<button class="opt s${it.t}" data-say="${it.id}">${glyph(it.t)}<span class="hz">${esc(it.hz)}</span>${py(it.py)}</button>`).join("")}</div>
-    <div class="modes">
-      <button class="mode" data-drill="tone"><span class="ic">${I.ear}</span><span><b>Какой тон?</b><br><span>10 слогов на слух</span></span></button>
-      <button class="mode" data-drill="pair"><span class="ic">${I.pairs}</span><span><b>Пары тонов</b><br><span>10 слов из двух слогов</span></span></button>
-      <button class="mode" data-drill="sound"><span class="ic">${I.similar}</span><span><b>Похожие звуки</b><br><span>zh — z, b — p, an — ang…</span></span></button>
-      <button class="mode" data-drill="shadow"><span class="ic">${I.wave}</span><span><b>Повтор за диктором</b><br><span>слушай → повтори, без рук</span></span></button>
-      <button class="mode" data-drill="speak"><span class="ic">${I.speak}</span><span><b>Скажи сам</b><br><span>микрофон и мелодия голоса</span></span></button>
-      <button class="mode" data-drill="price"><span class="ic">${I.coin}</span><span><b>Цены на слух</b><br><span>как на рынке</span></span></button>
-    </div>
-    <div class="sec-title">20 пар — нажми и послушай</div>
-    <div class="combos">${combos.map(c => `<button class="opt" data-play="${c.id}"><div class="combo">${c.tones.map(t => `<span style="color:var(--t${t})">${glyph(t)}</span>`).join("")}</div><span class="hz">${esc(c.hz)}</span>${py(c.py)}</button>`).join("")}</div>
-    <p class="small muted">Строка — тон первого слога, столбец — второго. Последний столбец — лёгкий тон. 3 + 3 произносится как 2 + 3.</p>
-  </div>`;
-  $$("[data-say]").forEach(b => b.onclick = () => say(ITEM.get(b.dataset.say), {btn: b}));
-  $$("[data-play]").forEach(b => b.onclick = () => say(ITEM.get(b.dataset.play), {btn: b}));
-  $$("[data-drill]").forEach(b => b.onclick = () => {
-    const k = b.dataset.drill;
-    if (k === "shadow") return shadowSheet();
-    if (k === "speak" && !speakOn()) { S.speakOffUntil = 0; save(); }
-    openPlayer(genDrill(k), {title: {tone: "Какой тон?", pair: "Пары тонов", speak: "Скажи сам", price: "Цены на слух", sound: "Похожие звуки"}[k], kind: k}); autoplay();
-  });
-}
-function renderMe(){
-  renderTop("Я");
-  const s = streak(), d = S.days[dayKey()] || {};
-  const WD = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
-  const now = new Date(Date.now() - 4 * 3600000), dow = (now.getDay() + 6) % 7;
-  const week = WD.map((w, k) => { const t = Date.now() - (dow - k) * DAY, dd = S.days[dayKey(t)] || {}, full = (dd.sec || 0) >= goalSec(), part = dayActive(dd); return `<div><i class="${full ? "full" : part ? "part" : ""} ${k === dow ? "today" : ""}">${full ? I.check : ""}</i>${w}</div>`; }).join("");
-  const sw = (k, on) => `<button class="switch" role="switch" aria-checked="${!!on}" data-set="${k}" aria-label="${k}"></button>`;
-  const sc = Sync.cfg(), env = S.env || {};
-  view().innerHTML = `<div class="stack">
-    <div class="card"><div class="hero"><span class="pillstat fire" style="height:auto;padding:10px 14px;font-size:22px">${I.fire}${s}</span>
-      <div class="grow"><b>${s ? `${s} ${plural(s, "день", "дня", "дней")} подряд` : "Серия начнётся сегодня"}</b><p class="small muted">Сегодня ${Math.floor((d.sec || 0) / 60)} из ${S.settings.goal} мин · ${d.xp || 0} очков</p></div></div>
-      <div class="week" style="margin-top:14px">${week}</div></div>
-    ${noteCard()}
-    <div class="sec-title">Цель на день</div>
-    <div class="seg" role="group" aria-label="Цель на день">${[10, 20, 30, 45].map(g => `<button data-goal="${g}" aria-pressed="${S.settings.goal === g}">${g} мин</button>`).join("")}</div>
-    <p class="small muted" style="margin:0 4px">10 минут — минимум в тяжёлый день. Главное — не пропускать два дня подряд.</p>
-    <div class="sec-title">Настройки</div>
-    <div class="card" style="padding:4px 16px">
-      <div class="setrow"><span class="lab">Пиньинь в вариантах ответа<small>Выключи, чтобы учиться читать иероглифы</small></span>${sw("pinyin", S.settings.pinyin)}</div>
-      <div class="setrow"><span class="lab">Голос помедленнее</span>${sw("slowVoice", S.settings.slowVoice)}</div>
-      <div class="setrow"><span class="lab">Звуки «верно / неверно»</span>${sw("sfx", S.settings.sfx)}</div>
-      <div class="setrow"><span class="lab">Задания «скажи вслух»</span>${sw("speak", S.settings.speak)}</div>
-      <div class="setrow"><span class="lab">Проверка слов по речи<small>Распознавание речи iPhone. Если мешает записи — выключи</small></span>${sw("recog", S.settings.recog)}</div>
-    </div>
-    <div class="sec-title">Микрофон</div>
-    <div class="card stack">
-      <p class="small">${env.t ? `Последняя проверка ${esc(dayKey(env.t))}, ${hhmm(env.t)}:` : "Ещё не проверяли. Нажми и скажи «你好»."}</p>
-      ${env.t ? `<div class="check-list">
-        <div class="${env.mic ? "ok-line" : "no-line"}">${env.mic ? "✓" : "✗"} Микрофон${env.micErr ? ` (${esc(env.micErr)})` : ""}</div>
-        <div class="${env.rec && env.mel ? "ok-line" : "no-line"}">${env.rec && env.mel ? "✓" : "✗"} Мелодия голоса</div>
-        <div class="${env.sr ? "ok-line" : "no-line"}">${env.sr ? "✓" : "✗"} Проверка слов${env.srErr && !env.sr ? ` (${esc(env.srErr)})` : ""}</div>
-        <div class="${env.standalone ? "ok-line" : "muted"}">${env.standalone ? "✓ Открыто с экрана «Домой»" : "Открыто в Safari, не с экрана «Домой»"}</div></div>` : ""}
-      <button class="btn block" id="micTest">${I.mic.replace("<svg ", '<svg fill="none" stroke="currentColor" stroke-width="2" ')}Проверить микрофон</button>
-    </div>
-    <div class="sec-title">Claude видит прогресс</div>
-    <div class="card stack" id="syncCard">${syncCardHTML(sc)}</div>
-    <div class="sec-title">Приложение</div>
-    <div class="card stack">
-      <p class="small muted">Версия ${esc(VERSION)}${standalone() ? "" : " · открыто в браузере"}</p>
-      <button class="btn block" id="upd">Проверить обновление</button>
-      <button class="btn ghost block" id="dl">Скачать весь звук для работы без интернета</button>
-    </div>
-  </div>`;
-  $$("[data-goal]").forEach(b => b.onclick = () => { S.settings.goal = +b.dataset.goal; touch(); renderMe(); });
-  $$("[data-set]").forEach(b => b.onclick = () => { const k = b.dataset.set; S.settings[k] = !S.settings[k]; if (k === "speak" && S.settings.speak) S.speakOffUntil = 0; touch(); b.setAttribute("aria-checked", S.settings[k]); });
-  $("#micTest").onclick = () => { const id = (C.cards.find(c => c.hz === "你好") || C.cards[0]).id; openPlayer([{type: "speak", id}], {title: "Проверка микрофона"}); autoplay(); };
-  $("#upd").onclick = async () => { try { const r = await navigator.serviceWorker.getRegistration(); if (r) { await r.update(); toast(r.installing || r.waiting ? "Скачиваю новую версию…" : "Стоит последняя версия"); } else toast("Обновления работают только с сайта"); } catch (e) { toast("Нет сети — проверю позже"); } };
-  $("#dl").onclick = () => { if (navigator.serviceWorker && navigator.serviceWorker.controller) { navigator.serviceWorker.controller.postMessage("cache-audio"); toast("Качаю звук в фоне, ~6 МБ"); } else toast("Работает только с сайта"); };
-  bindSyncCard();
-}
-
-/* ---------- синхронизация с закрытым хранилищем GitHub ---------- */
-const SYNC_LS = "zh-sync";
-const DEFAULT_REPO = "unclenesh23-debug/chinese-progress";
-// страница GitHub с уже заполненным ключом: имя, срок, право «Contents: запись»; хранилище хозяин выбирает сам
-const TOKEN_URL = "https://github.com/settings/personal-access-tokens/new?name=chinese-phone&description=" + encodeURIComponent("Приложение «Китайский»: прогресс для Claude") + "&target_name=unclenesh23-debug&expires_in=366&contents=write";
-function b64enc(str){ const bytes = new TextEncoder().encode(str); let bin = ""; for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)); return btoa(bin); }
-function b64dec(b64){ const bin = atob(String(b64).replace(/\s/g, "")); const bytes = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i); return new TextDecoder().decode(bytes); }
-const Sync = {
-  sha: null, notesSha: null, timer: 0, busy: false, last: 0, err: "",
-  cfg(){ try { return JSON.parse(localStorage.getItem(SYNC_LS) || "null"); } catch (e) { return null; } },
-  setCfg(c){ try { if (c) localStorage.setItem(SYNC_LS, JSON.stringify(c)); else localStorage.removeItem(SYNC_LS); } catch (e) {} },
-  async api(path, opts = {}){
-    const c = this.cfg(); if (!c) throw new Error("off");
-    const r = await fetch("https://api.github.com/repos/" + c.repo + "/contents/" + path, Object.assign({cache: "no-store"}, opts, {headers: {"Authorization": "Bearer " + c.token, "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json"}}));
-    return r;
-  },
-  snapshot(){ return {v: 1, app: VERSION, updated: S.updated, env: S.env, settings: S.settings, lessons: S.lessons, days: S.days, srs: S.srs}; },
-  merge(r){
-    if (!r || typeof r !== "object") return;
-    for (const id in r.srs || {}) { const a = S.srs[id], b = r.srs[id]; if (!a || (b.n || 0) > (a.n || 0)) S.srs[id] = b; }
-    for (const id in r.lessons || {}) { const a = S.lessons[id], b = r.lessons[id]; if (!a) S.lessons[id] = b; else { a.n = Math.max(a.n || 0, b.n || 0); a.best = Math.max(a.best || 0, b.best || 0); } }
-    for (const k in r.days || {}) {
-      const a = S.days[k], b = r.days[k]; if (!a) { S.days[k] = b; continue; }
-      for (const f of ["xp", "sec", "lessons", "reviews", "right", "wrong", "words"]) a[f] = Math.max(a[f] || 0, b[f] || 0);
-      for (const f of ["done", "plan"]) if (b[f]) { a[f] = a[f] || {}; for (const x in b[f]) a[f][x] = typeof b[f][x] === "number" ? Math.max(a[f][x] || 0, b[f][x]) : (a[f][x] || b[f][x]); }
-    }
-  },
-  async pull(){
-    if (!this.cfg() || this.busy || !navigator.onLine) return;
-    this.busy = true;
-    try {
-      const r = await this.api("progress.json");
-      if (r.ok) { const j = await r.json(); this.sha = j.sha; this.merge(JSON.parse(b64dec(j.content))); save(); }
-      else if (r.status === 404) this.sha = null;
-      else throw new Error("HTTP " + r.status);
-      const n = await this.api("notes.json");
-      if (n.ok) { const j = await n.json(); if (j.sha !== this.notesSha) { this.notesSha = j.sha; S.notes = JSON.parse(b64dec(j.content)); save(); if (!P) render(); } }
-      this.err = "";
-    } catch (e) { this.err = String(e.message || e); }
-    this.busy = false;
-  },
-  async push(retry){
-    if (!this.cfg() || !navigator.onLine) return false;
-    if (this.busy) { this.schedule(); return false; }
-    this.busy = true;
-    try {
-      if (this.sha === null && !retry) { const g = await this.api("progress.json"); if (g.ok) { const j = await g.json(); this.sha = j.sha; this.merge(JSON.parse(b64dec(j.content))); } }
-      const body = {message: "Прогресс " + dayKey() + " " + hhmm(Date.now()), content: b64enc(JSON.stringify(this.snapshot(), null, 1))};
-      if (this.sha) body.sha = this.sha;
-      const r = await this.api("progress.json", {method: "PUT", body: JSON.stringify(body)});
-      if (r.status === 409 || r.status === 422) { this.busy = false; this.sha = null; if (!retry) return this.push(true); throw new Error("конфликт версий"); }
-      if (!r.ok) throw new Error(r.status === 401 ? "ключ не подходит" : r.status === 404 ? "нет доступа к хранилищу" : "HTTP " + r.status);
-      const j = await r.json(); this.sha = j.content.sha; this.last = Date.now(); this.err = "";
-      try { localStorage.setItem(SYNC_LS + "-last", String(this.last)); } catch (e) {}
-    } catch (e) { this.err = String(e.message || e); this.busy = false; this.updateCard(); return false; }
-    this.busy = false; this.updateCard(); return true;
-  },
-  schedule(){ if (!this.cfg()) return; clearTimeout(this.timer); this.timer = setTimeout(() => this.push(), 5000); },
-  flushSoon(){ if (!this.cfg()) return; clearTimeout(this.timer); this.timer = setTimeout(() => this.push(), 300); },
-  lastTime(){ if (this.last) return this.last; try { return +localStorage.getItem(SYNC_LS + "-last") || 0; } catch (e) { return 0; } },
-  updateCard(){ const el = $("#syncCard"); if (el) { el.innerHTML = syncCardHTML(this.cfg()); bindSyncCard(); } }
+/* ===== ui: экраны по «Контракту разметки 1а» (Plans/phase_2/screens.md) ===== */
+const I = {
+  play: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 9v6h4l5 5V4L7 9H3z"/><path d="M16.5 12A4.5 4.5 0 0 0 14 8v8a4.5 4.5 0 0 0 2.5-4z"/></svg>',
+  slow: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 16c0-4.5 3.4-8 7.5-8S18 11.5 18 16H3z"/><path d="M18 14h1.5a2 2 0 0 0 0-4H18"/><path d="M6 16v3M14.5 16v3"/></svg>',
+  mic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>',
+  stop: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
+  x: '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>',
+  today: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M4 11 12 4l8 7v9h-5v-6H9v6H4z"/></svg>',
+  me: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c1-4.5 4-6.5 8-6.5s7 2 8 6.5"/></svg>'
 };
-window.addEventListener("online", () => Sync.flushSoon());
-function syncCardHTML(c){
-  if (!c) return `<p class="small">Подключи закрытое хранилище — Claude будет видеть уроки, ошибки и серию и писать тебе план. Один раз, 3 минуты.</p>
-    <a class="btn block" href="${TOKEN_URL}" target="_blank" rel="noopener">1. Создать ключ на GitHub</a>
-    <p class="small muted">Там выбери хранилище <b>chinese-progress</b>, проверь «Contents — Read and write», нажми «Generate token» и скопируй ключ.</p>
-    <input class="field" id="tok" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="2. Вставь ключ (github_pat_…)">
-    <input class="field" id="repo" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(DEFAULT_REPO)}" aria-label="Хранилище">
-    <button class="btn primary block" id="conn">3. Подключить</button>`;
-  const t = Sync.lastTime();
-  return `<div class="${Sync.err ? "no-line" : "ok-line"}">${Sync.err ? "✗ " + esc(Sync.err) : "✓ Подключено"}</div>
-    <p class="small muted">${Sync.busy ? "Связываюсь с хранилищем…" : t ? "Отправлено: " + (dayKey(t) === dayKey() ? "сегодня" : dayKey(t)) + " в " + hhmm(t) : "Ещё не отправлялось"} · ${esc(c.repo)}</p>
-    <div class="row"><button class="btn grow" id="pushNow">Отправить сейчас</button><button class="btn ghost" id="disc">Отключить</button></div>`;
+const UI = { tab: "today", sub: null, pageOk: false, pack: null, packAt: 0, reloadPending: false, firstShown: false, inSession: false, homeHint: true };
+const Run = { q: null, shownAt: 0, plays: 0, answered: false, saving: Promise.resolve(), rec: null, lastTick: 0 };
+
+function toast(msg, ms) { const t = $("#toast"); t.textContent = msg; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => { t.hidden = true; }, ms || 2600); }
+function mount(el) {
+  Player.stop();
+  const app = $("#app");
+  for (const c of Array.from(app.children)) { if (c.classList.contains("boot")) c.hidden = true; else c.remove(); } // каркас 1.1–1.3 остаётся скрытым — для экрана ошибки
+  app.append(el);
+  $("#ov").textContent = "";
+  UI.shownAt = performance.now();
+  document.documentElement.setAttribute("data-ready", "true");
 }
-function bindSyncCard(){
-  const conn = $("#conn");
-  if (conn) conn.onclick = async () => {
-    const token = $("#tok").value.trim(), repo = $("#repo").value.trim().replace(/^https?:\/\/github\.com\//, "").replace(/\/$/, "");
-    if (!token || !/^[\w.-]+\/[\w.-]+$/.test(repo)) { toast("Вставь ключ и название хранилища"); return; }
-    conn.disabled = true; conn.textContent = "Проверяю…";
-    try {
-      const r = await fetch("https://api.github.com/repos/" + repo, {cache: "no-store", headers: {"Authorization": "Bearer " + token, "Accept": "application/vnd.github+json"}});
-      if (!r.ok) throw new Error(r.status === 401 ? "Ключ не подходит" : r.status === 404 ? "Хранилище не найдено или ключ к нему без доступа" : "Ошибка " + r.status);
-      const j = await r.json();
-      if (!j.private) { toast("Хранилище открытое — нужно закрытое, там личный прогресс", 4000); throw new Error("не закрытое"); }
-      Sync.setCfg({repo, token}); Sync.sha = null;
-      await Sync.pull(); const ok = await Sync.push();
-      toast(ok ? "Готово! Claude видит прогресс" : "Подключено, отправлю позже", 3000);
-    } catch (e) { toast(String(e.message || e), 3500); }
-    Sync.updateCard();
-  };
-  const pn = $("#pushNow"); if (pn) pn.onclick = async () => { pn.disabled = true; const ok = await Sync.push(); toast(ok ? "Отправлено" : "Не вышло: " + Sync.err); };
-  const dc = $("#disc"); if (dc) dc.onclick = () => openSheet(`<h2>Отключить?</h2><p class="muted" style="margin:8px 0 16px">Ключ удалится с телефона. Прогресс на телефоне останется, но Claude перестанет его видеть.</p><div class="stack"><button class="btn primary block" data-act="keep">Оставить</button><button class="btn ghost block" data-act="off">Отключить</button></div>`, {keep: closeSheet, off: () => { Sync.setCfg(null); closeSheet(); Sync.updateCard(); }});
+function overlay(el) { $("#ov").append(el); UI.shownAt = performance.now(); return el; }
+const closeOv = sel => { const o = $(sel, $("#ov")); if (o) o.remove(); };
+function tabs(on) {
+  const t = (id, label, icon) => h("button", { type: "button", class: "tab", test: "tab", "data-to": id, "data-state": on === id ? "on" : "off", onclick: () => { if (id === "today") { UI.tab = "today"; UI.sub = null; renderToday(); } else { UI.tab = "me"; UI.sub = null; renderMe(); } } }, h("span", { html: icon }), label);
+  return h("nav", { class: "tabs" }, t("today", "Сегодня", I.today), t("me", "Я", I.me));
+}
+function bar(n, of) { return h("div", { class: "bar" }, h("i", { style: "width:" + (of ? Math.round(n / of * 100) : 0) + "%" })); }
+function playBtn(url, cls, attrs) {
+  const b = h("button", Object.assign({ type: "button", class: "pbtn " + (cls || "big"), test: "play", "data-state": url ? "idle" : "missing", "aria-label": "Слушать", html: I.play }, attrs || {}));
+  b.addEventListener("click", () => { Run.plays++; Player.play(url, { btn: b }).then(r => { if (r === "missing") onMissing(b); }); });
+  return b;
+}
+function slowUrl(id) { const w = W(id) || C.x[id]; return w && w.s ? (w.s.fs || w.s.ms || null) : null; }
+function slowBtn(id) {
+  const b = h("button", { type: "button", class: "pbtn mid", test: "slow", "data-state": clipOf(id) ? "idle" : "missing", "aria-label": "Медленно", html: I.slow });
+  b.addEventListener("click", () => { Run.plays++; const s = slowUrl(id); Player.play(s || clipOf(id), { btn: b, slow: !s }).then(r => { if (r === "missing") onMissing(b); }); });
+  return b;
+}
+function onMissing(btn) {
+  if (btn && !btn.isConnected) return; // звук от прошлого экрана — к текущему вопросу не относится
+  if (btn) btn.setAttribute("data-state", "missing");
+  if (Run.q && !Run.answered) Run.noSound = true; // ответ без звука не двигает повторение (М1)
+  // 3.5 — только пока на вопрос не ответили и только у заданий со звуком; после ответа — просто перечёркнутая кнопка
+  if (!Run.q || Run.answered || !["4.8", "4.3", "4.4", "4.1", "4.2"].includes(Run.q.x) || $("[data-overlay='3.5']")) return;
+  const zone = $(".zone"); if (!zone) return;
+  $$("[data-test=cant-listen]").forEach(x => { x.hidden = true; });
+  $$("[data-test=next]", zone).forEach(x => { x.hidden = true; }); // одна «Дальше» на экране
+  zone.append(h("div", { class: "panel bad", "data-overlay": "3.5" },
+    h("div", { class: "ttl" }, h("button", { type: "button", class: "pbtn sm", test: "play", "data-state": "missing", disabled: true, html: I.play }), "Звук не скачан"),
+    h("p", { class: "trap", text: navigator.onLine === false ? "Звук этого слова не скачан, интернета нет. Пропускаю — вернём, когда будет сеть." : "Звук этого слова не загрузился. Пропускаю — вернём позже." }),
+    h("button", { type: "button", class: "btn main", test: "next", text: "Дальше", onclick: () => skipQ("audio") })));
+}
+const dateLine = () => { const d = new Date(); return WEEK_RU[d.getDay()] + ", " + d.getDate() + " " + DATE_RU[d.getMonth()]; };
+const lessonNum = lid => { const l = lessonOf(lid); return l ? l.n : 0; };
+function lessonLabel(lid) { const l = lessonOf(lid); return l ? "урок " + l.n + (l.title ? " · " + l.title : "") : "урок"; }
+
+/* ---------- 1.4, 1.5, 1.6: первый запуск ---------- */
+function inApp() { // WeChat, Telegram и другие встроенные браузеры iPhone: в их строке нет «Safari/». С «Домой» — никогда.
+  const ua = navigator.userAgent, home = document.documentElement.getAttribute("data-standalone") === "true";
+  return !home && (/MicroMessenger|Telegram|FBAN|FBAV|Instagram|Line\//i.test(ua) || !!window.TelegramWebviewProxy || (/iPhone|iPad|iPod/.test(ua) && !/Safari\//.test(ua)));
+}
+function showGate() {
+  const link = location.origin + location.pathname;
+  if (inApp()) {
+    mount(h("section", { class: "scr", "data-screen": "1.5" }, h("div", { class: "body" },
+      h("h1", { text: "Открой в Safari" }),
+      h("p", { class: "line", text: "Внутри WeChat и Telegram не работает микрофон и не сохранится прогресс." }),
+      h("ol", { class: "steps" }, h("li", { text: "Нажми «···» вверху." }), h("li", { text: "«Открыть в браузере» (Safari)." }), h("li", { text: "В Safari: «Поделиться» → «На экран „Домой“»." })),
+      h("p", { class: "card", style: "margin-top:16px;word-break:break-all" }, h("a", { href: link, test: "link", style: "color:var(--link);display:inline-block;min-height:44px;padding:10px 0", text: link }))),
+      h("div", { class: "foot" }, h("button", { type: "button", class: "btn main", test: "copy-link", text: "Скопировать ссылку", onclick: () => copyText(link).then(ok => toast(ok ? "Ссылка скопирована ✓" : "Не скопировалось — нажми на ссылку и подержи")) }))));
+    return true;
+  }
+  if (document.documentElement.getAttribute("data-standalone") !== "true" && UI.homeHint) {
+    mount(h("section", { class: "scr", "data-screen": "1.4" }, h("div", { class: "body" },
+      h("h1", { text: "Поставь на экран «Домой»" }),
+      h("p", { class: "line", text: "Во вкладке Safari iPhone сотрёт прогресс, если 7 дней не заходить. С «Домой» — не сотрёт и работает без интернета." }),
+      h("ol", { class: "steps" }, h("li", { text: "«Поделиться» — квадрат со стрелкой, внизу или в меню «···»." }), h("li", { text: "«На экран „Домой“»." }), h("li", { text: "Открой «Китайский» с иконки." })),
+      h("p", { class: "line", text: "Занятия во вкладке Safari в значок на «Домой» не перейдут — у них разная память." })),
+      h("div", { class: "foot" },
+        h("button", { type: "button", class: "btn main", test: "ok", text: "Понятно", onclick: () => { UI.homeHint = false; route(); } }))));
+    return true;
+  }
+  return false;
+}
+function lessonGrid(onPick, inSheet) {
+  const books = C.books.filter(b => b.lessons.length);
+  const cur = ST.lesson && ST.lesson.id;
+  const bid = UI.book || (cur && lessonOf(cur) ? lessonOf(cur).book : books[0].id);
+  const kids = [];
+  if (books.length >= 2) kids.push(h("div", { class: "books" }, books.map(b => h("button", { type: "button", class: "btn", test: "book", "data-book": b.id, "aria-pressed": b.id === bid ? "true" : "false", text: b.short || b.title, onclick: () => { UI.book = b.id; onPick(null); } }))));
+  kids.push(h("div", { class: "lgrid" }, bookLessons(bid).map(l => h("button", { type: "button", class: "btn", test: "lesson", "data-lesson": l.n, "data-book": l.book, "data-state": l.id === cur ? "on" : "off", "aria-label": "Урок " + l.n, text: String(l.n), onclick: () => onPick({ id: l.id }) }))));
+  kids.push(h("button", { type: "button", class: "btn sec", test: "lesson-other", text: "Урок не из 1上 или дальше 15", onclick: () => onPick({ other: true }) }));
+  kids.push(h("button", { type: "button", class: inSheet ? "btn sec" : "btn main", test: "catchup", text: "Не знаю — догоняю 1上", onclick: () => onPick({ catchup: true }) }));
+  return kids;
+}
+function setLesson(v) { // экран меняется сразу, запись в память идёт следом (очередь commit)
+  ST.lesson = v;
+  return commit([{ k: "lesson", t: Date.now(), l: v.id || (v.other ? "other" : "catchup") }]);
+}
+function showFirst() {
+  const pick = v => { if (!v) return showFirst(); setLesson(v); UI.tab = "today"; renderToday(); downloadSoon(); };
+  mount(h("section", { class: "scr", "data-screen": "1.6" }, h("div", { class: "body" },
+    h("h1", { text: "Какой урок сейчас на парах?" }),
+    h("p", { class: "line", text: "Новое каждый день — из этого урока. Одно касание — и начинаем." }),
+    h("div", { style: "display:grid;gap:12px" }, lessonGrid(pick, false)))));
+}
+function lessonSheet() {
+  const close = () => closeOv("[data-overlay='2.6']");
+  const pick = v => { if (!v) { close(); return lessonSheet(); } setLesson(v); close(); UI.sub === "settings" ? renderSettings() : renderToday(); downloadSoon(); };
+  const sh = h("div", { class: "shade", "data-overlay": "2.6", onclick: e => { if (e.target === sh) close(); } },
+    h("div", { class: "sheet" }, h("div", { class: "grab" }), h("h2", { text: "Какой урок сейчас на парах?" }),
+      lessonGrid(pick, true), h("p", { class: "line", text: "Новое каждый день — из этого урока." }),
+      h("button", { type: "button", class: "btn main", test: "close", text: "Готово", onclick: close })));
+  overlay(sh);
 }
 
-/* ---------- запуск ---------- */
-$$("#tabs button").forEach(b => b.onclick = () => { if (tab === b.dataset.tab) { view().scrollTop = 0; return; } tab = b.dataset.tab; stopAudio(); render(); view().scrollTop = 0; });
-async function boot(){
-  try {
-    const r = await fetch("content.json?v=" + VERSION);
-    C = await r.json();
-  } catch (e) { view().innerHTML = `<div class="card">Не загрузилось. Проверь интернет и открой ещё раз.</div>`; return; }
-  indexContent();
-  render();
-  if ("serviceWorker" in navigator && location.protocol !== "file:") {
-    const hadCtl = !!navigator.serviceWorker.controller;
-    navigator.serviceWorker.register("sw.js").then(reg => {
-      // когда звук ещё не скачан — докачать в фоне
-      setTimeout(() => { if (navigator.serviceWorker.controller) navigator.serviceWorker.controller.postMessage("cache-audio"); }, 8000);
-      setInterval(() => reg.update().catch(() => {}), 30 * MIN);
-    }).catch(() => {});
-    let reloaded = false;
-    navigator.serviceWorker.addEventListener("controllerchange", () => {
-      if (!hadCtl || reloaded) return; reloaded = true;
-      const go = () => { if (P) return setTimeout(go, 3000); location.reload(); };
-      toast("Приложение обновилось"); setTimeout(go, 1200);
-    });
-  }
-  Sync.pull().then(() => { if (Sync.cfg() && S.updated > Sync.lastTime()) Sync.schedule(); });
+/* ---------- 2.x Сегодня ---------- */
+function planLines(plan) {
+  const L = plan.L, n = lessonNum(L), out = [];
+  if (plan.parts.includes("review") && plan.review) out.push("Повторение · " + plan.review);
+  if (plan.parts.includes("check")) out.push("Проверка урока " + n + " · 2–3 мин");
+  if (plan.parts.includes("new")) out.push(plan.onlyReview ? "Сегодня только повторение" : "Новые слова урока " + n + " · до " + Math.max(1, plan.newN));
+  out.push("Тоны на слух · 10–15");
+  out.push(micOff() ? "Скажи по памяти — микрофон выключен на час" : "Скажи по памяти · 3–5");
+  return out;
 }
-boot();
-// для проверки из консоли
-window.__zh = {S, C: () => C, P: () => P, Sync, genLesson, LESSON, ITEM, DLG, SND, SH, scoreHeard, loadHz, planDay, planSteps};
+function netPlate(L) {
+  if (navigator.onLine !== false) return null;
+  const st = L ? Snd.state(L) : { n: 1, of: 1 };
+  const pl = h("div", { class: "netbar", "data-overlay": "2.9" }, h("b", { text: "Нет интернета — занимаемся тем, что скачано" }),
+    h("span", { test: "queued", "data-n": 0, text: "Ответы сохранены на телефоне." }));
+  if (st.n < st.of) pl.append(h("span", { test: "no-audio-note", text: "Звук урока " + lessonNum(L) + " скачан не весь — возьмём слова со скачанным звуком." }));
+  pendingCount().then(n => { const q = $("[data-test=queued]", pl); if (q) { q.setAttribute("data-n", n); q.textContent = "Ответы сохранены на телефоне" + (n ? ": " + n + " — скопируешь для Claude, когда удобно." : "."); } });
+  return pl;
+}
+function closeStale() { // вчерашнее незаконченное занятие не продолжаем: ответы уже в журнале, новый день — заново
+  if (!SESS || UI.inSession || SESS.d >= dayNum()) return;
+  const s = SESS; SESS = null;
+  commit([{ k: "F", t: Date.now(), s: s.id, d: s.d, min: Math.round((s.act || 0) / MIN), n: s.n, stale: 1 }]);
+}
+function renderToday() {
+  UI.tab = "today"; UI.sub = null; UI.inSession = false;
+  closeStale();
+  if (lessonMode() === "none") return showFirst();
+  const d = dayNum(), mode = lessonMode(), plan = planDay(), L = plan.L;
+  const scr = SESS ? "2.2" : dayDone(d) ? "2.3" : mode === "other" ? "2.7" : "2.1";
+  const body = h("div", { class: "body" });
+  const st = streak();
+  body.append(h("div", { class: "top" }, h("div", {}, h("h1", { text: "Сегодня" }), h("div", { class: "date", text: dateLine() })),
+    h("button", { type: "button", class: "streak", test: "streak", "data-days": st, "aria-label": "Серия", onclick: () => toast("Серия — дни подряд, когда занятие засчитано") }, "🔥 ", h("b", { text: String(st) }), " " + plural(st, "день", "дня", "дней"))));
+  const net = netPlate(L); if (net) body.append(net);
+  if (listenOff()) body.append(h("button", { type: "button", class: "row", test: "listen-on", onclick: () => { ST.set.noListen = 0; commit([{ k: "off", t: Date.now(), what: "listen-on" }]); renderToday(); } },
+    h("span", { text: "Задания на слух выключены до " + hhmm(ST.set.noListen) }), h("b", { style: "color:var(--link)", text: "Включить" })));
+  if (scr !== "2.7") {
+    const lbl = mode === "lesson" ? "На парах: " + lessonLabel(L) : "Урок на парах: выбрать";
+    body.append(h("button", { type: "button", class: "row", test: "lesson-now", "data-lesson": lessonNum(L), onclick: lessonSheet }, h("span", { text: lbl }), h("span", { class: "chev", text: "›" })));
+  }
+  const ls = bookLessons("hj1");
+  if (mode === "lesson") {
+    const r = readyOf(L);
+    body.append(h("div", { class: "prog", test: "ready", "data-n": r.n, "data-of": r.of }, h("span", { text: "К паре знаю " + r.n + " из " + r.of + " " + plural(r.of, "слова", "слов", "слов") }), bar(r.n, r.of)));
+  } else {
+    const k = lessonNum(catchupLesson());
+    body.append(h("div", { class: "prog", test: "catchup-line", "data-lesson": k, "data-of": ls.length }, h("span", { text: (scr === "2.7" ? "Пока догоняю 1上 · урок " : "Догоняю 1上 · урок ") + k + " из " + ls.length }), bar(k - 1, ls.length)));
+  }
+  const due = dueList(d).length - (scr === "2.3" ? 0 : plan.review);
+  let card;
+  if (scr === "2.2") {
+    const left = Math.max(1, Math.round(sessLeftMs() / MIN));
+    card = h("div", { class: "card" }, h("h2", { text: "Занятие не закончено" }),
+      h("p", { class: "line", test: "saved", "data-n": SESS.n, text: SESS.n + " " + plural(SESS.n, "ответ сохранён", "ответа сохранено", "ответов сохранено") + " — продолжишь с того же места." }),
+      h("button", { type: "button", class: "btn main", test: "continue", "data-min": left, text: "Продолжить с места · ≈ " + left + " мин", onclick: resumeDay }));
+  } else if (scr === "2.3") {
+    const last = ST.last && ST.last.d === d ? ST.last : null, min = (ST.days[d] && ST.days[d].done) || 15;
+    card = h("div", { class: "card" }, h("div", { class: "done-big", test: "day-done", "data-min": min }, h("span", { class: "seal", text: "✓" }), "День засчитан · " + min + " мин"),
+      last && last.wrong && last.wrong.length ? h("p", { class: "line", text: "Завтра вернутся: " + last.wrong.map(id => W(id) ? W(id).hz : "").join(", ") }) : null,
+      h("p", { class: "line", text: "Завтра — новое занятие на 15 минут." }),
+      copyBtn("btn sec"));
+  } else {
+    if (scr === "2.7") body.append(h("div", { class: "card", test: "photo-hint" }, h("h2", { text: "Твоего урока пока нет" }),
+      h("ol", { class: "steps" }, h("li", { text: "Сфотографируй страницу 生词 своего урока." }), h("li", { text: "Отправь фото в чат «Китайский» в приложении Claude." }), h("li", { text: "Claude добавит урок за день — он появится здесь." })),
+      h("p", { class: "line", text: "Пока занимаемся повторением, тонами и догоняем 1上." })));
+    card = h("div", { class: "card" }, h("h2", { text: "Занятие на 15 минут" }), h("ul", { class: "plan" }, planLines(plan).map(t => h("li", { text: t }))),
+      h("button", { type: "button", class: "btn main", test: "start", "data-min": 15, text: "Начать · 15 минут", onclick: beginDay }));
+  }
+  body.append(card);
+  if (due > 0) body.append(h("p", { class: "line", test: "due", "data-n": due, text: (scr === "2.3" ? "Ждут повторения: " : "И ещё ") + due + " " + plural(due, "слово", "слова", "слов") + (scr === "2.3" ? " — завтра." : " ждут повторения — возьмём завтра.") }));
+  const ps = L ? Snd.state(L) : null;
+  if (ps && ps.n < ps.of) body.append(h("p", { class: "line", test: "pack", "data-n": ps.n, "data-of": ps.of, text: "Звук урока " + lessonNum(L) + (navigator.onLine === false ? ": скачан на " : " качается… ") + Math.round(ps.n / Math.max(1, ps.of) * 100) + " %" }));
+  mount(h("section", { class: "scr tabbed", "data-screen": scr, "data-tab": "today" }, body, tabs("today")));
+  if (UI.updated) { const v = UI.updated; UI.updated = null; showUpdated(v); }
+  if (scr === "2.3") prebuildPack();
+}
+function showUpdated(v) {
+  if (UI.inSession) return;
+  const p = overlay(h("div", { class: "plate", "data-overlay": "1.9", "data-version": VERSION, role: "status", text: "Обновлено: новая версия приложения" + (v ? " (" + v + ")" : "") }));
+  setTimeout(() => p.remove(), 3000);
+}
+
+/* ---------- занятие ---------- */
+function sessLeftMs() {
+  if (!SESS) return 15 * MIN;
+  let left = 0;
+  SESS.parts.forEach((pt, i) => {
+    if (i < SESS.pi) return;
+    const qs = pt.q ? pt.q.slice(pt.i) : null;
+    const est = qs ? qs.reduce((a, q) => a + estMs(q), 0) : PART_MS[pt.p];
+    left += Math.max(0, Math.min(est, PART_MS[pt.p] * 1.2 - (pt.ms || 0)));
+  });
+  return left;
+}
+function tick(force) {
+  const now = Date.now();
+  if (SESS && Run.lastTick && (force || !document.hidden)) {
+    const dt = Math.min(now - Run.lastTick, 90000);
+    SESS.act += dt; const pt = SESS.parts[SESS.pi]; if (pt) pt.ms = (pt.ms || 0) + dt;
+  }
+  Run.lastTick = now;
+}
+function commit(evs, extra) {
+  const kv = Object.assign({ st: ST, sess: SESS }, extra || {});
+  const snap = JSON.parse(JSON.stringify(kv));
+  try { localStorage.setItem("zh2-id", JSON.stringify({ dev: ST.dev, lesson: ST.lesson, copy: ST.copy })); } catch (e) {} // на случай потери снимка
+  Run.saving = Run.saving.then(() => DB.commit(evs, snap)).catch(async e1 => {
+    try { await DB.reopen(); return await DB.commit(evs, snap); } // один повтор с новым соединением
+    catch (e2) { saveFailed(errText(e2 || e1)); }
+  });
+  return Run.saving;
+}
+function saveFailed(why) { // запись не проходит — честно говорим и пишем в журнал при следующем запуске
+  try { localStorage.setItem("zh2-savefail", JSON.stringify({ t: Date.now(), why: String(why).slice(0, 160) })); } catch (e) {}
+  if ($("[data-test=save-fail]")) return;
+  document.body.append(h("div", { class: "plate warn", test: "save-fail", role: "alert", text: "Не сохраняется — закрой и открой приложение" }));
+}
+function beginDay() {
+  Player.unlock();
+  const plan = planDay(), t = Date.now();
+  SESS = { id: rid(), d: plan.d, t0: t, parts: plan.parts.map(p => ({ p, q: null, i: 0, ms: 0 })), pi: 0, n: 0, act: 0, newN: plan.newN, wrong: [], again: false,
+    st: { tones: [0, 0], recall: [0, 0], newW: [], newOf: 0, check: null } };
+  Run.lastTick = t;
+  commit([{ k: "S", t, s: SESS.id, d: plan.d, parts: plan.parts.join(","), L: plan.L }]);
+  UI.inSession = true;
+  nextQuestion();
+}
+function resumeDay() { Player.unlock(); Run.lastTick = Date.now(); UI.inSession = true; nextQuestion(); }
+function partDone(pt) {
+  if (!pt.q) return false;
+  if (pt.i >= pt.q.length) return true;
+  const q = pt.q[pt.i];
+  if (q.again) return false;
+  if (pt.p === "check") return pt.ms > PART_MS.check * 1.5;
+  if (pt.p === "new" && q.x !== "4.1") return false;
+  return pt.ms > PART_MS[pt.p] * 1.15;
+}
+function nextQuestion() {
+  if (!SESS) return renderToday();
+  tick();
+  Run.answered = false; Run.plays = 0; Run.rec = null; Run.noSound = false;
+  for (let guard = 0; guard < 500; guard++) {
+    const pt = SESS.parts[SESS.pi];
+    if (!pt) {
+      // ошибки — ещё раз в конце занятия
+      const wrong = SESS.wrong.filter(id => W(id) && playable(id));
+      if (!SESS.again && wrong.length) {
+        SESS.again = true; SESS.pi = SESS.parts.length - 1;
+        const last = SESS.parts[SESS.pi];
+        wrong.forEach(id => { const q = q48(id, last.p); q.again = true; last.q.push(q); });
+        continue;
+      }
+      return finishDay();
+    }
+    if (!pt.q) { pt.q = buildPart(pt.p, { d: SESS.d, L: curLesson(), newN: SESS.newN }, SESS); if (pt.p === "new") SESS.st.newOf = pt.q.filter(q => q.x === "4.1").length;
+      if (pt.p === "recall" && !SESS.again) { // ошибки дня — перед «Скажи по памяти», чтобы после записи звука было меньше
+        const rep = SESS.wrong.filter(id => W(id) && playable(id)).map(id => { const x = q48(id, pt.p); x.again = true; return x; });
+        if (rep.length) { SESS.again = true; pt.q = rep.concat(pt.q); }
+      }
+      commit([]); }
+    if (partDone(pt)) {
+      if (pt.p === "check" && !SESS.st.check) {
+        const L = curLesson(), qs = pt.q.filter(q => q.x === "4.8" && q.r != null);
+        SESS.st.check = { l: L, n: qs.filter(q => q.r === 2).length, of: qs.length };
+        const ev = { k: "C", t: Date.now(), d: SESS.d, l: L, n: SESS.st.check.n, of: SESS.st.check.of }; apply(ev); commit([ev]);
+      }
+      SESS.pi++; continue;
+    }
+    const q = pt.q[pt.i];
+    const listen = q.x === "4.8" || q.x === "4.3" || q.x === "4.4";
+    if ((listen && listenOff()) || (q.x === "4.9" && micOff()) || !W(q.w) || (q.o && q.x !== "4.3" && q.o.some(o => !W(o)))
+      || ((listen || q.x === "4.1" || q.x === "4.2") && clipOf(q.w) && SND_FAILED.has(absUrl(clipOf(q.w))))) { pt.i++; continue; } // звук слова недоступен — пропуск без тишины // снятое слово или «не могу» — пропуск
+    Run.q = q; Run.shownAt = Date.now();
+    return showQ(q, pt);
+  }
+  finishDay();
+}
+function skipQ(why) {
+  if (!SESS) return;
+  const pt = SESS.parts[SESS.pi];
+  commit([{ k: "skip", t: Date.now(), w: Run.q && Run.q.w, why, s: SESS.id }]);
+  if (pt && Run.q && pt.q[pt.i] === Run.q && !Run.answered) pt.i++;
+  nextQuestion();
+}
+function head(pt) {
+  const i = SESS.parts.indexOf(pt), n = Math.min(pt.i + 1, pt.q.length), of = pt.q.length;
+  const parts = SESS.parts.map((x, j) => h("div", { class: "part", test: "part", "data-part": x.p, "data-state": j < i ? "done" : j === i ? "now" : "todo", style: j === i ? "--p:" + Math.max(6, Math.round(pt.i / Math.max(1, of) * 100)) + "%" : null }, h("i")));
+  const left = Math.max(1, Math.ceil(sessLeftMs() / MIN));
+  return h("div", { class: "shead", test: "session-head" },
+    h("button", { type: "button", class: "btn icon", test: "close", "aria-label": "Пауза", html: I.x, onclick: pause }),
+    h("div", { class: "parts", test: "progress" }, parts),
+    h("div", { class: "tleft", test: "time-left", "data-min": left, text: "≈ " + left + " мин" }),
+    h("span", { test: "counter", "data-n": n, "data-of": of, hidden: true }));
+}
+function partLabel(pt) {
+  const n = Math.min(pt.i + 1, pt.q.length), of = pt.q.length, q = pt.q[Math.min(pt.i, pt.q.length - 1)];
+  if (pt.p === "new" && q) { // считаем слова, а не экраны (методист, Н5)
+    const intro = pt.q.filter(x => x.x === "4.1"), quiz = pt.q.filter(x => x.x === "4.8");
+    const t = q.x === "4.1" ? "слово " + (intro.indexOf(q) + 1) + " из " + intro.length : q.x === "4.2" ? "только на слух" : "проверка " + (quiz.indexOf(q) + 1) + " из " + quiz.length;
+    return h("div", { class: "elabel", text: "Новое · " + t });
+  }
+  const name = pt.p === "check" ? "Проверка урока " + lessonNum(curLesson()) : PARTS[pt.p];
+  return h("div", { class: "elabel", text: name + " · " + n + " из " + of });
+}
+function exScreen(q, pt, screen, kids, zone, extra, top) {
+  const w = W(q.w);
+  const root = h("section", Object.assign({ class: "scr ex", "data-screen": screen, "data-part": pt.p, "data-word": q.w, "data-lesson": lessonNum(w.l) }, extra || {}),
+    head(pt), h("div", { class: "ebody" }, h("div", { class: "erow" }, partLabel(pt), top || null), kids), zone);
+  mount(root);
+  return root;
+}
+function showQ(q, pt) {
+  if (q.x === "4.1") return showNew(q, pt);
+  if (q.x === "4.2") return showPassive(q, pt);
+  if (q.x === "4.9") return showSay(q, pt);
+  return showChoice(q, pt);
+}
+function showChoice(q, pt) {
+  const w = W(q.w), url = clipOf(q.w);
+  const T = { "4.8": ["Что ты услышал?", "Выбери перевод"], "4.3": ["Какой тон?", "Слушай и выбери тоны"], "4.4": ["Тот же слог — другой тон", "Какое слово прозвучало?"] }[q.x];
+  const btns = q.o.map((o, i) => {
+    const attrs = { type: "button", class: "opt", test: "opt", "data-state": "idle", "data-correct": i === q.c ? "true" : "false" };
+    let inner;
+    if (q.x === "4.3") { attrs["data-tones"] = o; inner = h("span", { class: "tones", html: tonesHTML(o.split(" ").map(Number)) }); }
+    else inner = h("span", { text: W(o) ? W(o).ru : "?" });
+    return h("button", attrs, inner, h("span", { class: "mark", "aria-hidden": "true" })); // значок ✓/✗ — место заранее, вариант не сдвигается
+  });
+  btns.forEach((b, i) => b.addEventListener("click", () => choose(q, i, btns)));
+  const pb = playBtn(url, "big");
+  const kids = [h("div", { class: "etitle", text: T[0] }), h("div", { class: "ehint", text: q.x === "4.3" ? w.hz + " — " + (tonesOf(w.py).length === 1 ? "слушай и выбери тон" : "слушай и выбери тоны") : T[1] }),
+    h("div", { class: "playrow" }, pb, q.x !== "4.4" ? slowBtn(q.w) : null),
+    h("div", { class: "opts" + (q.x === "4.4" ? " two" : "") }, btns)];
+  const zone = h("div", { class: "zone" }); // место под панель «Верно / Не так»; «не могу слушать» — наверху, не под «Дальше»
+  exScreen(q, pt, q.x, kids, zone, null, h("button", { type: "button", class: "btn link", test: "cant-listen", text: "Не могу слушать", onclick: cantListen }));
+  Player.play(url, { btn: pb }).then(r => { if (r === "missing") onMissing(pb); });
+}
+function cantListen() {
+  ST.set.noListen = Date.now() + 60 * MIN;
+  toast("Задания со звуком убраны на час");
+  commit([{ k: "off", t: Date.now(), what: "listen" }]);
+  skipQ("cant-listen");
+}
+function trapOf(q, right) {
+  const w = W(q.w);
+  if (q.x === "4.4") { const o = W(q.o[1 - q.c]); return w.hz + " " + w.py + " — " + w.ru + "; " + o.hz + " " + o.py + " — " + o.ru; }
+  return w.nt || null;
+}
+function choose(q, i, btns) {
+  if (Run.answered) return;
+  const p35 = $("[data-overlay='3.5']"); if (p35) p35.remove(); // ответил, хотя звук не пришёл, — панель «не скачан» уходит, «Дальше» одна
+  Run.answered = true;
+  const right = i === q.c, now = Date.now();
+  btns.forEach((b, j) => {
+    b.disabled = true;
+    b.setAttribute("data-state", j === i ? (right ? "picked-right" : "picked-wrong") : j === q.c ? "reveal" : "off");
+    if (j === i) { const m = b.querySelector(".mark"); if (m) m.textContent = right ? "✓" : "✗"; }
+  });
+  Player.ding(right);
+  answer(q, right ? 2 : 0, q.x === "4.8" ? "h" : "t", now);
+  const w = W(q.w), url = clipOf(q.w), pb = playBtn(url, "sm");
+  const trap = trapOf(q, right);
+  const showTrap = trap && (!right || q.x === "4.3"), again = !right && !q.again;
+  const panel = h("div", { class: "panel " + (right ? "ok" : "bad"), "data-overlay": right ? "3.3" : "3.4", role: "status" },
+    h("div", { class: "ttl" }, h("span", { text: right ? "✓ Верно" : "✗ Не так" }), pb),
+    h("div", { class: "ans", test: right ? null : "answer", "data-word": q.w }, h("span", { class: "hz", text: w.ph ? w.ph.hz : w.hz }), h("span", { class: "pyp", html: pyHTML(w.ph ? w.ph.py : w.py) }), h("span", { text: w.ru })),
+    showTrap || again ? h("p", { class: "trap" }, showTrap ? h("span", { test: right ? null : "trap", text: trap + " " }) : null, again ? h("span", { class: "mut", text: "Вернётся в конце занятия." }) : null) : null,
+    h("button", { type: "button", class: "btn main", test: "next", text: right ? "Дальше" : "Понятно", onclick: nextQuestion }));
+  const zone = $(".zone"); zone.append(panel);
+  $$("[data-test=cant-listen]").forEach(x => { x.hidden = true; });
+  if (!right) Player.play(url, { btn: pb });
+}
+function answer(q, r, sk, now) {
+  if (!SESS) return;
+  tick();
+  const pt = SESS.parts[SESS.pi], d = dayNum(now);
+  const ev = { k: "a", t: now, d, w: q.w, sk, x: q.x, r, pl: Run.plays, ms: Math.min(now - Run.shownAt, 120000), s: SESS.id, p: pt.p };
+  if (q.again) ev.ag = 1;
+  if (Run.noSound) ev.ns = 1; // «без звука»
+  apply(ev);
+  q.r = r; SESS.n++; pt.i++;
+  if (r === 0 && !q.again && !SESS.wrong.includes(q.w)) SESS.wrong.push(q.w);
+  if (sk === "t" && pt.p === "tones") { SESS.st.tones[1]++; if (r === 2) SESS.st.tones[0]++; } // в итоге — только блок «Тоны» (как в плане 10–15)
+  if (q.x === "4.9") { SESS.st.recall[1]++; if (r === 2) SESS.st.recall[0]++; }
+  commit([ev]);
+}
+function showNew(q, pt) {
+  const w = W(q.w), t = tonesOf(w.py), ex = w.ex && C.x[w.ex];
+  const voices = ["f", "m"].filter(v => w.s && w.s[v]).map(v => {
+    const b = h("button", { type: "button", class: "vbtn", test: "play", "data-voice": v, "data-state": "idle", html: I.play.replace("<svg", '<svg width="20" height="20"') + (v === "f" ? " Женский" : " Мужской") });
+    b.addEventListener("click", () => { Run.plays++; Player.play(w.s[v], { btn: b }).then(r => { if (r === "missing") onMissing(b); }); });
+    return b;
+  });
+  const sl = h("button", { type: "button", class: "vbtn", test: "slow", "data-state": "idle", html: I.slow.replace("<svg", '<svg width="20" height="20"') + " Медленно" });
+  sl.addEventListener("click", () => { Run.plays++; const s = slowUrl(q.w); Player.play(s || clipOf(q.w), { btn: sl, slow: !s }).then(r => { if (r === "missing") onMissing(sl); }); });
+  const len = Array.from(w.hz).length;
+  const kids = [h("div", { class: "newcard" },
+    h("div", { class: "tzg hz" + (len > 1 ? " w" + Math.min(len, 4) : ""), test: "char", text: w.hz }),
+    h("div", { class: "py", test: "pinyin", "data-tones": t.join(" "), html: pyHTML(w.py) + " " + t.map(x => '<span class="t' + x + '">' + glyph(x).replace("<svg", '<svg width="22" height="22"') + "</span>").join("") }),
+    h("div", { class: "ru", text: w.ru }),
+    w.ph ? h("div", { class: "excard" }, h("div", { class: "t" }, h("div", { class: "hz", html: esc(w.ph.hz).split(esc(w.hz)).join("<mark>" + esc(w.hz) + "</mark>") }), h("div", { html: pyHTML(w.ph.py) }), w.ph.ru ? h("div", { class: "mut", text: w.ph.ru + " · звучит во фразе" }) : null)) : null,
+    h("div", { class: "voices" }, voices, sl),
+    ex ? h("div", { class: "excard", test: "example" }, playBtn(clipOf(w.ex), "sm"), h("div", { class: "t" }, h("div", { class: "hz", text: ex.hz }), h("div", { html: pyHTML(ex.py) }), h("div", { class: "mut", text: ex.ru }))) : null,
+    h("div", { class: "tag", text: w.cl ? "Учим слышать и говорить · урок сверим по фото" : "Учим слышать и говорить" }))];
+  const zone = h("div", { class: "zone low" }, h("button", { type: "button", class: "btn main", test: "next", text: "Дальше", onclick: () => introDone(q, "n") }));
+  exScreen(q, pt, "4.1", kids, zone, { "data-kind": "active" });
+  if (voices[0]) voices[0].click();
+}
+function showPassive(q, pt) {
+  const w = W(q.w), ex = w.ph || (w.ex && C.x[w.ex]), part = w.k === "q" && ex; // частица — только во фразе (manifest контент-мастера или реплика диалога)
+  const url = w.ph ? clipOf(q.w) : part ? clipOf(w.ex) : clipOf(q.w), pb = playBtn(url, "big");
+  const kids = part
+    ? [h("div", { class: "etitle", text: "Частица во фразе" }), h("div", { class: "playrow" }, pb),
+      h("div", { class: "newcard" }, h("div", { class: "phrase", html: esc(ex.hz).split(esc(w.hz)).join("<mark>" + esc(w.hz) + "</mark>") }),
+        h("div", { class: "py", style: "font-size:20px", html: pyHTML(ex.py) }), h("div", { class: "ru", text: ex.ru }),
+        h("div", { class: "tag", text: w.hz + " " + w.py + " — " + w.ru + ". Слышим только во фразе." }))]
+    : [h("div", { class: "etitle", text: "Узнай на слух" }), h("div", { class: "playrow" }, pb),
+      h("div", { class: "newcard" }, h("div", { class: "tzg hz" + (Array.from(w.hz).length > 1 ? " w" + Math.min(Array.from(w.hz).length, 4) : "") , text: w.hz }),
+        h("div", { class: "py", html: pyHTML(w.py) }), h("div", { class: "ru", text: w.ru }), h("div", { class: "tag", text: "Только узнать на слух — говорить не нужно" }))];
+  const zone = h("div", { class: "zone low" }, h("button", { type: "button", class: "btn main", test: "next", text: "Дальше", onclick: () => introDone(q, "q") }));
+  exScreen(q, pt, "4.2", kids, zone, { "data-kind": w.k === "q" ? "particle" : "passive" });
+  Player.play(url, { btn: pb }).then(r => { if (r === "missing") onMissing(pb); });
+}
+function introDone(q, k) {
+  if (Run.answered || !SESS) return;
+  Run.answered = true;
+  tick();
+  const pt = SESS.parts[SESS.pi], now = Date.now(), ev = { k, t: now, d: dayNum(now), w: q.w, x: q.x, s: SESS.id, p: pt.p, ms: Math.min(now - Run.shownAt, 300000) };
+  apply(ev); pt.i++;
+  if (k === "n") SESS.st.newW.push(q.w);
+  commit([ev]);
+  nextQuestion();
+}
+
+/* ---------- 4.9–4.11, 4.13: скажи по памяти ---------- */
+function showSay(q, pt) {
+  const w = W(q.w);
+  const mic = h("button", { type: "button", class: "mic", test: "mic", "data-state": "idle", "aria-label": "Нажми и говори", html: I.mic, onclick: () => startRec(q, pt) });
+  const kids = [h("div", { class: "etitle", text: "Скажи по-китайски" }), h("div", { class: "prompt", test: "prompt", text: w.ru }),
+    h("div", { class: "center", style: "display:grid;gap:6px;justify-items:center;margin-top:8px" }, mic, h("div", { class: "ehint", text: "Нажми и говори" })),
+    h("button", { type: "button", class: "btn link", test: "reveal", style: "align-self:center;margin-top:6px", text: "Не вспомнил — показать", onclick: () => showSayResult(q, pt, null) })];
+  exScreen(q, pt, "4.9", kids, h("div", { class: "zone low" }), null, h("button", { type: "button", class: "btn link", test: "cant-speak", text: "Не могу говорить", onclick: cantSpeak }));
+}
+function cantSpeak() {
+  ST.set.micOff = Date.now() + 60 * MIN;
+  toast("Микрофон выключен на час — «скажи» вернётся позже");
+  commit([{ k: "off", t: Date.now(), what: "mic" }]);
+  skipQ("cant-speak");
+}
+async function startRec(q, pt) {
+  if (Mic.recording) return;
+  const w = W(q.w);
+  const tStart = performance.now(); // второе касание в первые 600 мс (двойное) запись не останавливает
+  const mic = h("button", { type: "button", class: "mic", test: "mic", "data-state": "recording", "aria-label": "Стоп", html: I.stop, onclick: () => { if (Mic.stopNow && performance.now() - tStart > 600) Mic.stopNow(); } });
+  const lv = h("div", { class: "level", test: "level" }, Array.from({ length: 9 }, () => h("i")));
+  const secs = h("div", { class: "ehint center", text: "Слушаю… 0,0 с" });
+  const kids = [h("div", { class: "etitle", text: "Скажи по-китайски" }), h("div", { class: "prompt", test: "prompt", text: w.ru }),
+    h("div", { style: "display:grid;justify-items:center;gap:4px" }, mic, lv, secs, h("div", { class: "ehint", text: "Остановлю сам после паузы — или нажми" }))];
+  exScreen(q, pt, "4.10", kids, h("div", { class: "zone low" }));
+  const bars = $$("i", lv), t0 = Date.now(); let k = 0;
+  const onLevel = r => { const x = Math.min(1, Math.sqrt(r) * 3.2); bars[k % bars.length].style.height = Math.round(6 + x * 50) + "px"; k++; secs.textContent = "Слушаю… " + ((Date.now() - t0) / 1000).toFixed(1).replace(".", ",") + " с"; };
+  try {
+    const rec = await Mic.record(3500, onLevel); // до 4 с (3,5), сама — после ~0,8 с тишины после голоса
+    Run.rec = rec;
+    showSayResult(q, pt, rec);
+  } catch (e) {
+    const why = e && e.reason ? e.reason : "no-mic";
+    commit([{ k: "M", t: Date.now(), why, e: e && e.err ? String(e.err).slice(0, 120) : errText(e) }]);
+    showMicTrouble(q, pt, why);
+  }
+}
+const MIC_TXT = {
+  denied: ["Нет доступа к микрофону", "iPhone спросит ещё раз — нажми «Разрешить». Не спрашивает? Настройки → Safari → Микрофон → «Спрашивать»."],
+  "no-mic": ["Микрофон не нашёлся или занят", "Закончи звонок или диктофон и нажми «Ещё раз». В WeChat и Telegram микрофон не работает — открой «Китайский» с экрана «Домой»."],
+  silent: ["Ничего не услышал", "Нажми, дождись, пока кнопка станет красной, и скажи слово целиком. Держи телефон сантиметрах в 20 от рта."]
+};
+function showMicTrouble(q, pt, why) {
+  const t = MIC_TXT[why] || MIC_TXT["no-mic"];
+  const kids = [h("div", { class: "etitle", text: "Микрофон" }), h("div", { class: "card" }, h("h2", { test: "reason", text: t[0] }), h("p", { class: "line", test: "help", text: t[1] }))];
+  const zone = h("div", { class: "zone low" },
+    h("button", { type: "button", class: "btn main", test: "retry", text: "Ещё раз", onclick: () => startRec(q, pt) }),
+    h("button", { type: "button", class: "btn sec", test: "skip-rec", text: "Пропустить запись", onclick: () => showSayResult(q, pt, null) }));
+  exScreen(q, pt, "4.13", kids, zone, { "data-reason": why });
+}
+function showSayResult(q, pt, rec) {
+  const w = W(q.w), url = clipOf(q.w), syl = sylls(w.py).map(s => s.s);
+  const gwrap = h("div", { class: "gwrap" });
+  const refB = playBtn(url, "sm", { "data-voice": "ref", class: "vbtn", html: "▶ Диктор" });
+  const row = h("div", { class: "brow" });
+  if (rec) {
+    const meUrl = URL.createObjectURL(makeWav(downsample(rec.pcm, rec.rate, 16000), 16000));
+    const meB = h("button", { type: "button", class: "vbtn", test: "play", "data-voice": "me", "data-state": "idle", text: "▶ Я" });
+    meB.addEventListener("click", () => Player.play(meUrl, { btn: meB, raw: true }));
+    row.append(meB);
+    gwrap.innerHTML = graphSVG(null, null, syl);
+    const me = contour(pitchTrack(rec.pcm, rec.rate));
+    refContour(url).then(ref => { if (gwrap.isConnected) gwrap.innerHTML = graphSVG(ref, me, syl); });
+  }
+  row.append(refB, h("button", { type: "button", class: "vbtn", test: "retry", text: "Ещё раз", onclick: () => startRec(q, pt) }));
+  const grade = (g, label) => h("button", { type: "button", class: "btn", test: "grade", "data-grade": g, text: label, onclick: () => {
+    if (Run.answered) return; Run.answered = true; answer(q, g, "s", Date.now()); nextQuestion();
+  } });
+  const kids = [h("div", { class: "wordline" }, h("span", { class: "hz", text: w.hz }), h("span", { class: "py", style: "font-size:20px", html: pyHTML(w.py) }), h("span", { text: w.ru })),
+    rec ? gwrap : h("p", { class: "line", text: "Записи нет — послушай диктора, скажи про себя и отметь честно." }),
+    rec ? h("div", { class: "legend" }, h("span", { class: "me", text: "ты" }), h("span", { class: "ref", text: "диктор" })) : null,
+    row, h("p", { class: "note", test: "honest-note", text: "Тон по слогам пока не оцениваю — сравни на слух и по линии." })];
+  const zone = h("div", { class: "zone low" }, h("div", { class: "ehint", text: "Как вспомнил?" }),
+    h("div", { class: "grades" }, grade(0, "Не вспомнил"), grade(1, "Почти"), grade(2, "Знал")));
+  exScreen(q, pt, "4.11", kids, zone, { "data-rec": rec ? "graph" : "none" });
+  if (!rec) Player.play(url, { btn: refB });
+}
+function downsample(pcm, from, to) {
+  if (from === to) return pcm;
+  const r = from / to, n = Math.floor(pcm.length / r), out = new Float32Array(n);
+  for (let i = 0; i < n; i++) { const a = Math.floor(i * r), b = Math.min(pcm.length, Math.floor((i + 1) * r)); let s = 0; for (let j = a; j < b; j++) s += pcm[j]; out[i] = s / Math.max(1, b - a); }
+  return out;
+}
+
+/* ---------- 3.2 пауза, конец дня, 5.1 ---------- */
+function pause() {
+  if (!SESS || $("[data-overlay='3.2']")) return;
+  Player.stop(); if (Mic.stopNow) Mic.stopNow();
+  tick(); commit([]);
+  const close = () => { closeOv("[data-overlay='3.2']"); Run.lastTick = Date.now(); };
+  overlay(h("div", { class: "shade", "data-overlay": "3.2" }, h("div", { class: "sheet" }, h("div", { class: "grab" }),
+    h("h2", { text: "Пауза" }),
+    h("p", { test: "saved", "data-n": SESS.n, text: (SESS.n ? "Всё сохранено (" + SESS.n + " " + plural(SESS.n, "ответ", "ответа", "ответов") + ")" : "Всё сохранено") + ". Продолжишь с этого места." }),
+    h("button", { type: "button", class: "btn main", test: "resume", text: "Продолжить", onclick: close }),
+    h("button", { type: "button", class: "btn sec", test: "home", text: "Выйти на «Сегодня»", onclick: () => { close(); UI.inSession = false; Player.stop(); if (UI.reloadPending) return reloadNow(); renderToday(); } }),
+    h("p", { class: "line", text: "Жест «назад» тоже ставит паузу." }))));
+}
+function finishDay() {
+  tick();
+  const s = SESS, now = Date.now(), d = s.d != null ? s.d : dayNum(now), min = Math.max(1, Math.round(s.act / MIN));
+  const evs = [{ k: "F", t: now, s: s.id, d, min, n: s.n }];
+  const first = !dayDone(d);
+  if (first) evs.push({ k: "D", t: now, d, min });
+  evs.forEach(apply);
+  ST.last = { d, min, st: s.st, wrong: s.wrong.slice(0, 12), first };
+  SESS = null; UI.inSession = false;
+  commit(evs);
+  showSummary();
+}
+function showSummary() {
+  const last = ST.last, st = last.st, d = last.d, nl = st.newW.map(id => W(id) ? W(id).hz : "").join(" ");
+  const ck = st.check;
+  const body = h("div", { class: "body" },
+    h("div", { class: "done-big", test: "day-done", "data-min": last.min }, h("span", { class: "seal", text: "✓" }), "День засчитан"),
+    h("p", { class: "line", test: "streak", "data-days": streak(), text: last.min + " мин · " + streak() + " " + plural(streak(), "день", "дня", "дней") + " подряд" }),
+    h("div", { class: "skills" },
+      h("div", { class: "skill", test: "skill", "data-skill": "tones", "data-n": st.tones[0], "data-of": st.tones[1] }, h("span", { text: "Тоны на слух" }), h("b", { text: st.tones[1] ? st.tones[0] + " из " + st.tones[1] : "сегодня не было" })),
+      h("div", { class: "skill", test: "skill", "data-skill": "new", "data-n": st.newW.length, "data-of": st.newOf }, h("span", { text: "Новые слова" + (nl ? ": " : "") }), h("b", { class: "hz", html: st.newW.length ? st.newW.filter(W).map(id => esc(W(id).hz) + " " + pyHTML(W(id).py)).join(" · ") : "сегодня не было" })),
+      h("div", { class: "skill", test: "skill", "data-skill": "recall", "data-n": st.recall[0], "data-of": st.recall[1] }, h("span", { text: "Скажи по памяти" }), h("b", { text: st.recall[1] ? "знал " + st.recall[0] + " из " + st.recall[1] : "сегодня не было" }))),
+    ck ? h("p", { class: "card", test: "check-line", "data-lesson": lessonNum(ck.l), text: "Урок " + lessonNum(ck.l) + ": узнал " + ck.n + " из " + ck.of + ". Узнанные вернутся через 3–7 дней, остальные — новыми словами." }) : null,
+    h("p", { class: "line", test: "tomorrow", text: last.wrong.length ? "Завтра вернутся: " + last.wrong.map(id => W(id) ? W(id).hz : "").join(", ") : "Ошибок нет — завтра только то, что по сроку." }),
+    copyBtn("btn sec"));
+  mount(h("section", { class: "scr", "data-screen": "5.1" }, body,
+    h("div", { class: "foot" }, h("button", { type: "button", class: "btn main", test: "done", text: "На сегодня всё", onclick: () => renderToday() }))));
+  prebuildPack();
+}
+
+/* ---------- 8.1 Я, 8.2 настройки ---------- */
+function sentInfo(pending) {
+  const c = ST.copy, at = c.t ? new Date(c.t).toISOString() : "";
+  const state = !c.t ? "never" : (Date.now() - c.t > 2 * DAY_MS && pending > 0 ? "stale" : "ok");
+  const text = !c.t ? "Ещё не копировал прогресс для Claude." : "Скопировано для Claude: " + whenText(c.t) + " · с тех пор " + pending + " " + plural(pending, "запись", "записи", "записей");
+  return { at, state, text };
+}
+function renderMe() {
+  UI.tab = "me"; UI.sub = null;
+  const d = dayNum(); let days7 = 0; for (let k = d - 6; k <= d; k++) if (dayDone(k)) days7++;
+  const ids = Object.keys(ST.w).filter(id => W(id)), kn = ids.filter(known).length, le = ids.filter(learned).length;
+  const sent = h("div", { class: "card", test: "sent", "data-at": "", "data-pending": 0, "data-state": "never" }, h("p", { text: "…" }));
+  const body = h("div", { class: "body" }, h("h1", { text: "Я", style: "margin-bottom:12px" }),
+    h("div", { class: "card" }, h("p", { test: "streak", "data-days": streak(), text: "Серия: " + streak() + " " + plural(streak(), "день", "дня", "дней") + " подряд" }),
+      h("p", { class: "line", text: "Дни занятий за неделю: " + days7 + " из 7" }),
+      h("p", { class: "line", text: ids.length ? "Слов встретил: " + ids.length + " · выучено (вспомнил вслух через неделю и позже): " + le : "Слов пока нет — начни первое занятие." })),
+    sent, copyBtn("btn main"),
+    h("button", { type: "button", class: "row", test: "settings", style: "margin-top:14px", onclick: renderSettings }, h("span", { text: "Настройки" }), h("span", { class: "chev", text: "›" })),
+    h("p", { class: "line", text: "Не очищай данные Safari — сотрёт прогресс на телефоне." }));
+  mount(h("section", { class: "scr tabbed", "data-screen": "8.1", "data-tab": "me" }, body, tabs("me")));
+  pendingCount().then(n => {
+    const s = sentInfo(n); sent.setAttribute("data-at", s.at); sent.setAttribute("data-pending", n); sent.setAttribute("data-state", s.state);
+    sent.firstChild.textContent = s.text;
+    if (s.state === "stale") sent.append(h("p", { class: "line", text: "Скопируй для Claude — он увидит, как идут дела." }));
+  });
+  prebuildPack();
+}
+function renderSettings() {
+  UI.sub = "settings";
+  const L = curLesson(), mode = lessonMode();
+  const theme = v => h("button", { type: "button", class: "btn", test: "theme", "data-value": v, "aria-pressed": ST.set.theme === v ? "true" : "false", text: { auto: "Как iPhone", light: "Светлая", dark: "Тёмная" }[v], onclick: () => { setTheme(v); renderSettings(); } });
+  const done = Snd.lessonsDone(), all = LESSONS.length, mb = Snd.totalMb(), pk = packNow();
+  const dl = h("button", { type: "button", class: "btn sec", test: "download-all", "data-mb": mb, disabled: done === all || navigator.onLine === false,
+    text: done === all ? "Весь звук скачан ✓" : "Скачать весь звук — " + String(mb).replace(".", ",") + " МБ", onclick: () => downloadAll(dl) });
+  const mm = micOff();
+  const body = h("div", { class: "body" },
+    h("button", { type: "button", class: "btn link", test: "back", style: "padding-left:0", text: "‹ Я", onclick: () => renderMe() }),
+    h("h1", { text: "Настройки", style: "margin:4px 0 8px" }),
+    h("div", { class: "set" }, h("span", { text: "Урок на парах" }), h("button", { type: "button", class: "btn", test: "lesson-now", "data-lesson": lessonNum(L), text: mode === "lesson" ? "Урок " + lessonNum(L) : mode === "other" ? "Не из 1上" : "Догоняю 1上", onclick: lessonSheet })),
+    h("div", { class: "set" }, h("span", { text: "Обычный день" }), h("b", { text: "15 минут" })),
+    h("div", { class: "set" }, h("span", { text: "Тема" }), h("div", { class: "seg" }, ["auto", "light", "dark"].map(theme))),
+    h("div", { class: "set" }, h("span", { test: "downloaded", "data-n": pk.n, "data-of": pk.of, text: "Звук " + pk.name + ": скачано " + pk.n + " из " + pk.of + (done ? " · уроков целиком: " + done + " из " + all : "") })),
+    dl,
+    h("div", { class: "set" }, h("span", { text: mm ? "Микрофон выключен до " + hhmm(ST.set.micOff) : "Не могу говорить — выключить микрофон на час" }),
+      h("button", { type: "button", class: "btn sw", test: "mute-mic", "data-state": mm ? "on" : "off", "aria-pressed": mm ? "true" : "false", text: mm ? "Вкл." : "Выкл.", onclick: () => { ST.set.micOff = mm ? 0 : Date.now() + 60 * MIN; commit([{ k: "off", t: Date.now(), what: mm ? "mic-on" : "mic" }]); renderSettings(); } })),
+    h("div", { style: "margin-top:14px" }, copyBtn("btn sec")),
+    h("p", { class: "ver", test: "version", "data-version": VERSION, text: "Версия " + VERSION }));
+  mount(h("section", { class: "scr tabbed", "data-screen": "8.2", "data-tab": "me" }, body, tabs("me")));
+  prebuildPack();
+}
+function setTheme(v) {
+  ST.set.theme = v; try { localStorage.setItem("zh2-theme", v); } catch (e) {}
+  applyTheme(); commit([]);
+}
+function applyTheme() {
+  const v = ST.set.theme || "auto";
+  let dark = v === "dark"; if (v === "auto") { try { dark = matchMedia("(prefers-color-scheme: dark)").matches; } catch (e) {} }
+  document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+  const m = $("meta[name=theme-color]"); if (m) m.setAttribute("content", dark ? "#121413" : "#B23A21");
+}
+async function downloadAll(btn) {
+  if (navigator.onLine === false) return toast("Нет интернета — скачаю, когда появится");
+  btn.disabled = true;
+  while (Snd.busy) await sleep(300); // фоновое скачивание урока закончится — потом всё остальное
+  await Snd.download(LESSONS.map(l => l.id), p => { if (btn.isConnected) btn.textContent = "Качаю: " + p.n + " из " + p.of; });
+  if (UI.sub === "settings") renderSettings();
+}
+function packNow() { // звук урока на парах и следующего
+  const L = curLesson(), i = LESSONS.findIndex(l => l.id === L), next = LESSONS[i + 1];
+  const lids = [L].concat(next ? [next.id] : []).filter(Boolean);
+  let n = 0, of = 0; lids.forEach(l => { const s = Snd.state(l); n += s.n; of += s.of; });
+  return { lids, n, of, name: lids.length > 1 ? "уроков " + lessonNum(lids[0]) + "–" + lessonNum(lids[1]) : "урока " + lessonNum(L) };
+}
+let dlTimer = 0;
+function downloadSoon() { // звук урока на парах и следующего — заранее, в фоне
+  clearTimeout(dlTimer);
+  dlTimer = setTimeout(async () => {
+    if (navigator.onLine === false || !C) return;
+    const L = curLesson(), lids = packNow().lids;
+    if (lids.every(l => { const s = Snd.state(l); return s.n === s.of; })) return;
+    const live = () => { const pk = packNow(), el = $("[data-test=downloaded]"); if (el) { el.setAttribute("data-n", pk.n); el.setAttribute("data-of", pk.of); el.textContent = "Звук " + pk.name + ": скачано " + pk.n + " из " + pk.of; } };
+    await Snd.download(lids, p => { live(); const el = $("[data-test=pack]"); if (el) { const s = Snd.state(L); el.setAttribute("data-n", s.n); el.textContent = "Звук урока " + lessonNum(L) + ": скачано " + s.n + " из " + s.of + " · качаю…"; } });
+    live();
+    const el = $("[data-test=pack]"); if (el) { const s = Snd.state(L); if (s.n === s.of) el.remove(); else el.textContent = "Звук урока " + lessonNum(L) + ": скачано " + s.n + " из " + s.of; }
+  }, 1200);
+}
+
+/* ---------- «Скопировать для Claude»: пакет, у каждой строки короткая сумма, в шапке — общая ---------- */
+const PASTE_HINT = "Приложение Claude → вкладка Code → окно 🀄 Китайский → вставь и отправь (компьютер должен быть включён)";
+const CRCT = (() => { const t = []; for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+const utf8 = s => new TextEncoder().encode(s);
+function crc32(s) { const b = utf8(s); let c = 0xFFFFFFFF; for (let i = 0; i < b.length; i++) c = CRCT[(c ^ b[i]) & 0xFF] ^ (c >>> 8); return ((c ^ 0xFFFFFFFF) >>> 0).toString(16).padStart(8, "0"); }
+async function pendingCount() { try { await Run.saving; return await DB.count(ST.copy.upto || 0); } catch (e) { return 0; } }
+function readSwLog() { return Promise.race([readSwLog0(), sleep(1500).then(() => [])]); }
+async function readSwLog0() {
+  return new Promise(ok => {
+    try {
+      const r = indexedDB.open("zh2-swlog", 1);
+      r.onupgradeneeded = () => r.result.createObjectStore("ev", { autoIncrement: true });
+      r.onerror = () => ok([]);
+      r.onsuccess = () => { const db = r.result; try { const q = db.transaction("ev").objectStore("ev").getAll(); q.onsuccess = () => { ok((q.result || []).slice(-6)); db.close(); }; q.onerror = () => { ok([]); db.close(); }; } catch (e) { ok([]); } };
+    } catch (e) { ok([]); }
+  });
+}
+async function buildPack() {
+  await Run.saving;
+  const from = ST.copy.prev || 0; // с перекрытием: прошлый пакет + новое — потерянная вставка не страшна, повторы убирает приём
+  const rows = await DB.since(from, 20000);
+  const d = dayNum(), ids = Object.keys(ST.w).filter(id => W(id));
+  let a = 0, r = 0, days7 = 0; for (let k = d - 6; k <= d; k++) { if (ST.days[k]) { a += ST.days[k].a || 0; r += ST.days[k].r || 0; } if (dayDone(k)) days7++; }
+  const m = lessonMode(), L = curLesson(), sw = await readSwLog();
+  const head = [
+    "КИТАЙСКИЙ → Claude · прогресс · " + dayStr(d).split("-").reverse().join(".") + " " + hhmm(Date.now()) + " · версия " + VERSION,
+    "Серия " + streak() + " · сегодня " + (dayDone(d) ? "засчитан (" + ST.days[d].done + " мин)" : "не засчитан") + " · урок на парах: " + (m === "lesson" ? lessonNum(L) : m === "other" ? "не из 1上, догоняю " + lessonNum(L) : "не знаю, догоняю " + lessonNum(L)),
+    "Знаю слов " + ids.filter(known).length + " · выучено " + ids.filter(learned).length + " · ждут повторения " + dueList(d).length + " · за 7 дней: дней " + days7 + ", ответов " + a + (a ? ", верно " + Math.round(r / a * 100) + " %" : ""),
+    "С «Домой»: " + (document.documentElement.getAttribute("data-standalone") === "true" ? "да" : "нет") + " · звук после записи: " + AFTER_REC + " · audioSession: " + (navigator.audioSession ? "есть" : "нет") + " · " + (navigator.userAgent.match(/OS [\d_]+/) || [""])[0].replace(/_/g, "."),
+    "Service worker: " + (sw.length ? sw.map(e => hhmm(e.t) + " " + e.k + (e.from ? " " + e.from : "") + (e.err ? " ✗" + e.err : "") + (e.on === false ? " без сети" : "")).join(" | ") : "журнала нет"),
+    "Устройство: " + ST.dev + " · события с №" + (from + 1),
+    "Вставь это сообщение целиком в чат «Китайский» — Claude сам положит его в файл (progress.py import)."
+  ];
+  const lines = rows.map(x => { const body = JSON.stringify(x.v); return "#" + String(x.k).padStart(6, "0") + " " + body + " ·" + crc32(body).slice(0, 4); });
+  const last = rows.length ? rows[rows.length - 1].k : from, LIMIT = 18 * 1024 - 1500, parts = []; // вставка > 20 КБ с iPhone не проверена — части ≤ 18 КБ
+  let cur = [], size = 0;
+  for (const ln of lines) { const b = utf8(ln).length + 1; if (cur.length && size + b > LIMIT) { parts.push(cur); cur = []; size = 0; } cur.push(ln); size += b; }
+  if (cur.length || !parts.length) parts.push(cur);
+  const texts = parts.map((pl, i) => {
+    const all = pl.join("\n"), sum = crc32(all), hd = i === 0 ? head.slice() : [head[0], head[head.length - 2]];
+    if (parts.length > 1) hd[0] += " · часть " + (i + 1) + " из " + parts.length;
+    return hd.join("\n") + "\n=== ПРОВЕРКА ВСТАВКИ · строк " + pl.length + " · байт " + utf8(all).length + " · контроль " + sum + " ===\n" + all + (all ? "\n" : "") + "=== КОНЕЦ · строк " + pl.length + " · контроль " + sum + " ===";
+  });
+  return { texts, text: texts[0], from, upto: Math.max(last, ST.copy.upto || 0), rows: lines.length };
+}
+function prebuildPack() { buildPack().then(p => { UI.pack = p; UI.packAt = Date.now(); UI.packPart = 0; }, e => logErr("пакет: " + errText(e))); }
+function copyText(t) {
+  return new Promise(done => {
+    const fallback = () => {
+      const ta = h("textarea", { readonly: true, style: "position:fixed;left:-9999px;top:0" }); ta.value = t; document.body.append(ta);
+      ta.select(); try { ta.setSelectionRange(0, t.length); } catch (e) {}
+      let ok = false; try { ok = document.execCommand("copy"); } catch (e) {}
+      ta.remove(); done(ok);
+    };
+    try { if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(t).then(() => done(true), fallback); return; } } catch (e) {}
+    fallback();
+  });
+}
+function copyBtn(cls) {
+  const b = h("button", { type: "button", class: cls, test: "copy-claude", "data-state": "idle", text: "Скопировать для Claude" });
+  b.addEventListener("click", async () => {
+    if (b.disabled) return;
+    b.disabled = true; // двойное касание — одно копирование
+    try {
+      let p = UI.pack && Date.now() - UI.packAt < 60000 ? UI.pack : null, ok = false;
+      if (!p || (UI.packPart || 0) >= p.texts.length) {
+        UI.packPart = 0;
+        const job = buildPack();
+        if (window.ClipboardItem && navigator.clipboard && navigator.clipboard.write) { // iPhone: текст собирается после касания
+          try { await navigator.clipboard.write([new ClipboardItem({ "text/plain": job.then(x => new Blob([x.texts[0]], { type: "text/plain" })) })]); ok = true; } catch (e) { ok = false; }
+        }
+        p = await job; UI.pack = p; UI.packAt = Date.now();
+        if (!ok) ok = await copyText(p.texts[0]);
+      } else ok = await copyText(p.texts[UI.packPart]);
+      const k = UI.packPart || 0;
+      if (!ok) { showCopyText(p.texts[k]); return; }
+      UI.packPart = k + 1;
+      if (UI.packPart < p.texts.length) {
+        b.textContent = "Скопировать ещё: часть " + (UI.packPart + 1) + " из " + p.texts.length;
+        toast("Скопирована часть " + UI.packPart + " из " + p.texts.length + " — вставь в окно 🀄 Китайский и нажми ещё раз", 4500);
+        return;
+      }
+      ST.copy = { t: Date.now(), prev: ST.copy.upto || 0, upto: p.upto, rows: p.rows };
+      commit([]);
+      b.setAttribute("data-state", "done"); b.textContent = "Скопировано ✓";
+      toast("Скопировано ✓ " + PASTE_HINT, 5500);
+      UI.pack = null; UI.packPart = 0;
+      if (UI.tab === "me" && !UI.sub) setTimeout(() => { if (UI.tab === "me" && !UI.sub) renderMe(); }, 1500);
+    } finally { b.disabled = false; }
+  });
+  return h("div", { class: "copywrap" }, b, h("p", { class: "line", text: PASTE_HINT }));
+}
+function showCopyText(t) {
+  const close = () => closeOv(".shade");
+  const ta = h("textarea", { readonly: true, style: "width:100%;height:40vh;font:13px ui-monospace,monospace;-webkit-user-select:text;user-select:text" }); ta.value = t;
+  overlay(h("div", { class: "shade" }, h("div", { class: "sheet" }, h("h2", { text: "Не скопировалось само" }),
+    h("p", { class: "line", text: "Нажми в текст, «Выбрать всё» → «Скопировать» и вставь в чат «Китайский»." }), ta,
+    h("button", { type: "button", class: "btn main", text: "Готово", onclick: close }))));
+}
+
+/* ===== main: запуск, «назад», обновление, журнал запусков и ошибок ===== */
+let errCount = 0, reloading = false;
+function logErr(m) {
+  if (errCount++ > 20) return;
+  const ev = { k: "E", t: Date.now(), m: String(m).slice(0, 300) };
+  try { if (DB.db || DB.mem) DB.commit([ev], {}).catch(() => {}); } catch (e) {}
+}
+document.addEventListener("click", e => { // двойное касание пальцем: второе — в то же место сразу после смены экрана — не считается
+  if (!e.isTrusted || !e.detail) return; // только настоящее касание (у программного нажатия нет точки касания)
+  const now = performance.now(), last = UI.lastTap;
+  UI.lastTap = { x: e.clientX, y: e.clientY, t: now };
+  // глотаем только «Дальше» нового слова (4.1, 4.2): второе касание не пролистывает слово, не показав; «не могу …» стоят наверху, под «Дальше» не попадают
+  const intro = e.target && e.target.closest && e.target.closest("[data-screen='4.1'] [data-test=next], [data-screen='4.2'] [data-test=next]");
+  if (intro && UI.guardUsed !== UI.shownAt && last && now - (UI.shownAt || 0) < 400 && now - last.t < 450 && Math.abs(e.clientX - last.x) < 48 && Math.abs(e.clientY - last.y) < 48) {
+    UI.guardUsed = UI.shownAt; e.stopPropagation(); e.preventDefault(); // не больше одного «лишнего» касания на экран
+  }
+}, true);
+window.addEventListener("error", e => { if (e && e.message) logErr(e.message + " @" + String(e.filename || "").split("/").pop() + ":" + e.lineno); });
+window.addEventListener("unhandledrejection", e => logErr("promise: " + errText(e && e.reason)));
+
+async function loadWords() {
+  let bad = 0;
+  for (let k = 0; ; k++) {
+    try {
+      // тот же адрес: с телефона — из памяти (service worker), иначе сеть. Из памяти ответ мгновенный — не ждём 15 с, если запнулся
+      const r = await fetchT("data/words.json", navigator.serviceWorker && navigator.serviceWorker.controller ? 4000 : 15000);
+      if (!r.ok) { BOOT.err("broken"); bad++; throw new Error("HTTP " + r.status); } // сервер ответил ошибкой — как битые данные: 1.3 сразу после повтора
+      const txt = await r.text();
+      let j = null;
+      try { j = JSON.parse(txt); } catch (e) { BOOT.err("broken"); bad++; throw e; }
+      if (!j || !j.w || !j.books || !j.books.length) { BOOT.err("broken"); bad++; throw new Error("пустой файл слов"); }
+      return j;
+    } catch (e) { if (navigator.onLine === false) BOOT.err("offline"); }
+    if (bad >= 2 && !BOOT.failed) BOOT.fail(); // указатель уроков повреждён дважды подряд — сразу «Данные повреждены»
+    if (BOOT.failed) return new Promise(() => {}); // показан 1.3 — ждём «Ещё раз» / «Открыть скачанное»
+    await sleep(k < 3 ? 1500 : 3000);
+  }
+}
+function route() {
+  if (showGate()) return;
+  if (lessonMode() === "none") return showFirst();
+  if (UI.tab === "me") return UI.sub === "settings" ? renderSettings() : renderMe();
+  renderToday();
+}
+function onBack() {
+  if ($("[data-overlay='2.6']")) return closeOv("[data-overlay='2.6']");
+  if (UI.inSession && SESS) return pause();
+  if ($(".shade")) return closeOv(".shade");
+  if ($("[data-screen='5.1']")) return renderToday();
+  if (UI.sub === "settings") return renderMe();
+  if (UI.tab === "me") return renderToday();
+  // на главном — остаёмся в приложении: «назад» не выкидывает никогда
+}
+function initHistory() {
+  try { history.replaceState({ zh: 0 }, ""); history.pushState({ zh: 1 }, ""); } catch (e) {}
+  window.addEventListener("popstate", () => { try { history.pushState({ zh: 1 }, ""); } catch (e) {} onBack(); });
+}
+function reloadNow() {
+  if (reloading) return; reloading = true;
+  try { localStorage.setItem("zh2-updated", VERSION); } catch (e) {}
+  location.reload();
+}
+function onUpdate() { if (UI.inSession) { UI.reloadPending = true; return; } reloadNow(); } // посреди занятия не перезагружаем — после выхода
+function saveNow() { if (SESS) { tick(); commit([]); } }
+
+async function boot() {
+  BOOT.progress(1);
+  const hadCtrl = !!(navigator.serviceWorker && navigator.serviceWorker.controller);
+  const [data, dbok] = await Promise.all([loadWords(), DB.open()]);
+  if (!dbok) { BOOT.fail("storage"); return; } // база не открылась — не уходим молча «в память»
+  indexContent(data);
+  BOOT.progress(2);
+  try { ST = await DB.get("st"); SESS = await DB.get("sess"); } catch (e) { ST = null; SESS = null; logErr("чтение памяти: " + errText(e)); }
+  if (!ST || !ST.w) {
+    ST = freshState();
+    try { const bk = JSON.parse(localStorage.getItem("zh2-id") || "null"); if (bk) Object.assign(ST, { dev: bk.dev || ST.dev, lesson: bk.lesson || null, copy: bk.copy || ST.copy }); } catch (e) {}
+    try { const evs = await DB.since(0); if (evs.length) rebuild(evs); } catch (e) {}
+  }
+  if (SESS && !(SESS.parts && SESS.parts.length)) SESS = null;
+  ST.set = Object.assign({ theme: "auto", micOff: 0, noListen: 0 }, ST.set);
+  ST.copy = Object.assign({ t: 0, upto: 0, prev: 0, rows: 0 }, ST.copy);
+  ST.launches = (ST.launches || 0) + 1;
+  try { localStorage.removeItem("zh2-updated"); } catch (e) {}
+  if (ST.ver && ST.ver !== VERSION) UI.updated = VERSION; // первое открытие после обновления — плашка 1.9 на 3 с
+  const prevVer = ST.ver; ST.ver = VERSION;
+  applyTheme();
+  BOOT.progress(3);
+  await Snd.init();
+  initHistory();
+  route();
+  BOOT.done(); // таймеры 8/20 с гасим только после первого экрана: ошибка при рисовании → 1.3 с «Ещё раз»
+  // service worker при первой установке ждёт этого «готово», чтобы не качать оболочку второй раз во время загрузки
+  const tellReady = () => { try { navigator.serviceWorker.getRegistration().then(r => { if (r) [r.installing, r.waiting, r.active].forEach(w => w && w.postMessage("zh2-ready")); }).catch(() => {}); } catch (e) {} };
+  if ("serviceWorker" in navigator) { setTimeout(tellReady, 700); setTimeout(tellReady, 1500); setTimeout(tellReady, 4000); }
+  // журнал запуска: время до каркаса и до экрана, сеть, «Домой», версия
+  const per = navigator.storage && navigator.storage.persisted ? await navigator.storage.persisted().catch(() => null) : null;
+  const ev = { k: "L", t: Date.now(), sk: Math.round(BOOT.t0 - (performance.timeOrigin || BOOT.t0)), ok: Math.round(performance.now()),
+    net: navigator.onLine === false ? 0 : 1, home: document.documentElement.getAttribute("data-standalone") === "true" ? 1 : 0, v: VERSION, sw: hadCtrl ? 1 : 0, per: per ? 1 : 0 };
+  if (UI.updated) ev.upd = prevVer;
+  try { const sf = localStorage.getItem("zh2-savefail"); if (sf) { localStorage.removeItem("zh2-savefail"); const x = JSON.parse(sf); commit([{ k: "E", t: Date.now(), m: "запись в память не прошла: " + x.why, at: x.t }]); } } catch (e) {}
+  try { const bf = localStorage.getItem("zh2-bootfail"); if (bf) { localStorage.removeItem("zh2-bootfail"); const x = JSON.parse(bf); commit([{ k: "E", t: Date.now(), m: "прошлый запуск не загрузился: " + x.r + " (" + (x.log || []).join(",") + ")", at: x.t }]); } } catch (e) {}
+  if (BOOT.log && BOOT.log.length) commit([{ k: "E", t: Date.now(), m: "загрузка с повторами: " + BOOT.log.slice(-5).join(",") }]);
+  if (BOOT.swErr) ev.swErr = BOOT.swErr;
+  commit([ev]);
+  if (!per && navigator.storage && navigator.storage.persist) navigator.storage.persist().then(ok => { if (ok) commit([{ k: "P", t: Date.now(), ok: 1 }]); }, () => {});
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.addEventListener("controllerchange", () => { if (hadCtrl) onUpdate(); });
+    navigator.serviceWorker.addEventListener("message", e => { if (e.data && e.data.type === "sw-updated" && e.data.v !== VERSION && hadCtrl) onUpdate(); });
+    setTimeout(() => { if (navigator.onLine !== false) navigator.serviceWorker.getRegistration().then(r => r && r.update()).catch(() => {}); }, 4000);
+  }
+  window.addEventListener("online", () => { document.documentElement.setAttribute("data-net", "online"); if (UI.tab === "today" && !UI.inSession && $("[data-screen^='2.']")) renderToday(); downloadSoon(); });
+  window.addEventListener("offline", () => { document.documentElement.setAttribute("data-net", "offline"); if (UI.tab === "today" && !UI.inSession && $("[data-screen^='2.']")) renderToday(); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) { tick(true); Player.stop(); if (Mic.stopNow) Mic.stopNow(); saveNow(); if (UI.reloadPending && !UI.inSession) reloadNow(); }
+    else Run.lastTick = Date.now();
+  });
+  window.addEventListener("pagehide", saveNow);
+  try { matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if ((ST.set.theme || "auto") === "auto") applyTheme(); }); } catch (e) {}
+  downloadSoon();
+  setTimeout(() => Snd.prune(), 8000);
+}
+boot().catch(e => { logErr("запуск: " + errText(e)); BOOT.err("broken"); BOOT.fail(); }); // не вечная заставка: «Не загрузилось» с «Ещё раз»
+
 })();

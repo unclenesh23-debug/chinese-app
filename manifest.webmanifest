@@ -1,14 +1,14 @@
 {
   "name": "Китайский каждый день",
   "short_name": "Китайский",
-  "description": "Уроки, тоны и повторение китайского на каждый день",
+  "description": "15 минут китайского в день: слух, тоны, речь",
   "lang": "ru",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#F6F5F2",
-  "theme_color": "#F6F5F2",
+  "theme_color": "#B23A21",
   "icons": [
     {"src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png"},
     {"src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png"},

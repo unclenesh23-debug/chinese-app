@@ -1,38 +1,295 @@
 <!doctype html>
-<html lang="ru">
+<html lang="ru" data-theme="light" data-standalone="false" data-net="online" data-version="2e1ccd9278">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>Китайский</title>
-<meta name="description" content="Китайский каждый день: уроки, слух, тоны, повторение">
-<meta name="theme-color" content="#F6F5F2" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#121413" media="(prefers-color-scheme: dark)">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Китайский">
+<meta name="theme-color" content="#B23A21">
 <meta name="format-detection" content="telephone=no">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/icon-180.png">
-<link rel="icon" type="image/png" href="icons/icon-192.png">
-<link rel="stylesheet" href="app.css?v=af2059286c">
+<link rel="icon" href="icons/icon-192.png">
+<title>Китайский</title>
+<style>:root{--bg:#F6F5F2;--card:#fff;--tx:#1C1F1E;--mut:#626967;--line:#DEDBD3;--soft:#EFEDE7;--pri:#D04126;--pri-tx:#fff;--edge:#9A2E19;--link:#B23A21;
+--ok:#17834A;--ok-tx:#fff;--ok-ink:#136B3C;--ok-soft:#E3F3EA;--bad:#C9302C;--bad-tx:#fff;--bad-ink:#A82824;--bad-soft:#FBE6E5;
+--t1:#C23A2E;--t2:#9E6200;--t3:#2C7A4B;--t4:#2E58B0;--t0:#6B7270;--band:#B23A21;--top:env(safe-area-inset-top);--bot:env(safe-area-inset-bottom);
+--rf:ui-rounded,"SF Pro Rounded",-apple-system,system-ui,sans-serif;--hzf:"PingFang SC","Hiragino Sans GB","Noto Sans CJK SC","Microsoft YaHei",sans-serif;color-scheme:light}
+html[data-theme=dark]{--bg:#121413;--card:#1E2120;--tx:#F2F2EF;--mut:#959D9A;--line:#343937;--soft:#272B29;--pri:#FF6B45;--pri-tx:#1A0F0B;--edge:#B8442A;--link:#FF8A6A;
+--ok:#43C97B;--ok-tx:#0B1A11;--ok-ink:#43C97B;--ok-soft:#173324;--bad:#F26B63;--bad-tx:#1F0B0A;--bad-ink:#F26B63;--bad-soft:#3A1E1C;
+--t1:#F0776C;--t2:#E7AA45;--t3:#5DC08A;--t4:#82A5F3;--t0:#99A29E;--band:#121413;color-scheme:dark}
+html[data-standalone=true]{--top:max(env(safe-area-inset-top),20px)}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--tx);font:17px/1.35 -apple-system,"SF Pro Text",system-ui,sans-serif;-webkit-text-size-adjust:100%}
+body{overflow:hidden;overscroll-behavior:none;-webkit-user-select:none;user-select:none}
+[hidden]{display:none!important}
+button{font:inherit;color:inherit;cursor:pointer}
+h1{font:700 28px/1.15 var(--rf);margin:0}
+h2{font:700 22px/1.2 var(--rf);margin:0}
+p{margin:0}
+.mut{color:var(--mut)}
+.hz{font-family:var(--hzf)}
+.band{position:fixed;left:0;right:0;top:0;height:var(--top);background:var(--band);z-index:60}
+#app{position:fixed;left:0;right:0;bottom:0;top:var(--top);display:flex;flex-direction:column}
+.scr{flex:1;display:flex;flex-direction:column;min-height:0}
+.body{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:12px 16px 16px;min-height:0}
+.foot{flex:none;display:flex;flex-direction:column;gap:10px;padding:10px 16px calc(12px + var(--bot))}
+.tabs~.foot,.scr.tabbed .foot{padding-bottom:12px}
+/* кнопки */
+.btn{display:flex;align-items:center;justify-content:center;gap:8px;min-height:48px;min-width:44px;padding:0 18px;border-radius:14px;border:0;font:600 17px/1.2 var(--rf);text-align:center;background:var(--card);color:var(--tx);box-shadow:0 3px 0 var(--line);transition:transform .15s,box-shadow .15s}
+.btn:active{transform:translateY(2px);box-shadow:0 1px 0 var(--line)}
+.btn.main{min-height:56px;width:100%;background:var(--pri);color:var(--pri-tx);box-shadow:0 4px 0 var(--edge);font-size:19px}
+.btn.main:active{box-shadow:0 2px 0 var(--edge)}
+.btn.sec{width:100%;border:2px solid var(--line);box-shadow:none}
+.btn.link{background:none;box-shadow:none;color:var(--link);font-weight:600;min-height:44px;padding:0 8px}
+.btn.wide{width:100%}
+.btn[disabled]{color:var(--mut);box-shadow:none}
+.icon{width:44px;height:44px;padding:0;border-radius:22px;background:none;box-shadow:none;font-size:22px}
+/* загрузка */
+.boot-c{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:24px;text-align:center}
+.logo{width:88px;height:88px;border-radius:22px;background:#D04126;color:#fff;font:600 54px/88px var(--hzf);text-align:center}
+.logo.off{background:var(--soft);color:var(--mut);font:400 48px/88px system-ui}
+.bar{width:220px;height:8px;border-radius:4px;background:var(--line);overflow:hidden}
+.bar i{display:block;height:100%;width:0;background:var(--pri);transition:width .25s}
+.ghost{padding:0 16px 24px;display:grid;gap:12px;opacity:.5}
+.ghost i{display:block;border-radius:14px;background:var(--soft);height:44px}.ghost .g2{height:120px}.ghost .g3{height:56px}
+.help{text-align:left;display:grid;gap:4px;margin-top:8px}
+/* вкладки */
+.tabs{flex:none;display:flex;border-top:1px solid var(--line);background:var(--bg);padding-bottom:var(--bot)}
+.tab{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;min-height:52px;border:0;background:none;color:var(--mut);font-size:12px;font-weight:600}
+.tab svg{width:26px;height:26px}
+.tab[data-state=on]{color:var(--link)}
+/* Сегодня */
+.top{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:12px}
+.date{color:var(--mut);font-size:15px;margin-top:2px}
+.streak{display:flex;align-items:center;gap:6px;min-height:44px;padding:0 12px;border-radius:22px;background:var(--card);border:0;font:700 17px var(--rf);box-shadow:0 2px 0 var(--line)}
+.streak b{color:var(--link)}
+.row{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;min-height:52px;padding:10px 14px;border-radius:14px;border:0;background:var(--card);text-align:left;box-shadow:0 2px 0 var(--line);margin-bottom:10px}
+.row .chev{color:var(--mut);font-size:22px}
+.prog{margin:4px 0 14px}
+.prog .bar{width:100%;margin-top:6px}
+.prog .bar i{background:var(--ok)}
+.card{background:var(--card);border-radius:18px;padding:16px;box-shadow:0 2px 0 var(--line);margin-bottom:12px}
+.card h2{margin-bottom:8px}
+.plan{list-style:none;margin:0 0 14px;padding:0;display:grid;gap:6px}
+.plan li{display:flex;gap:10px;align-items:baseline}
+.plan li::before{content:"";flex:none;width:8px;height:8px;border-radius:4px;background:var(--pri);transform:translateY(-2px)}
+.line{font-size:15px;color:var(--mut);margin:8px 0}
+.done-big{display:flex;align-items:center;gap:12px;font:700 22px var(--rf);color:var(--ok-ink)}
+.done-big .seal{width:52px;height:52px;border-radius:26px;background:var(--ok);color:var(--ok-tx);display:grid;place-items:center;font-size:28px}
+.steps{margin:8px 0 0;padding-left:22px;display:grid;gap:6px}
+.chip{display:inline-block;padding:2px 10px;border-radius:10px;background:var(--soft);font-size:15px}
+/* лист снизу и плашки */
+#ov{position:fixed;inset:0;pointer-events:none;z-index:40}
+#ov>*{pointer-events:auto}
+.shade{position:fixed;inset:0;background:rgba(0,0,0,.42);display:flex;align-items:flex-end;z-index:41}
+.sheet{width:100%;max-height:calc(100% - var(--top) - 12px);overflow-y:auto;background:var(--bg);border-radius:20px 20px 0 0;padding:16px 16px calc(16px + var(--bot));display:flex;flex-direction:column;gap:12px}
+.sheet .grab{width:40px;height:5px;border-radius:3px;background:var(--line);align-self:center}
+.lgrid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
+.lgrid .btn{min-height:52px;padding:0;font-size:19px}
+.lgrid .btn[data-state=on]{background:var(--pri);color:var(--pri-tx);box-shadow:0 3px 0 var(--edge)}
+.books{display:flex;gap:8px}.books .btn{flex:1}
+.plate{position:fixed;left:12px;right:12px;bottom:calc(16px + var(--bot));z-index:45;background:var(--tx);color:var(--bg);border-radius:14px;padding:12px 16px;font-size:15px;box-shadow:0 6px 18px rgba(0,0,0,.25)}
+.netbar{margin:-4px 0 12px;padding:10px 14px;border-radius:14px;background:var(--soft);font-size:15px;display:grid;gap:4px}
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(90px + var(--bot));z-index:70;max-width:calc(100% - 32px);background:var(--tx);color:var(--bg);padding:10px 16px;border-radius:12px;font-size:15px;text-align:center}
+/* занятие */
+.ex{flex:1;display:flex;flex-direction:column;min-height:0;position:relative}
+.shead{flex:none;display:flex;align-items:center;gap:8px;height:52px;padding:0 12px 0 4px}
+.parts{flex:1;display:flex;gap:4px}
+.part{flex:1;height:10px;border-radius:5px;background:var(--line);overflow:hidden}
+.part[data-state=done]{background:var(--ok)}
+.part[data-state=now]>i{display:block;height:100%;background:var(--pri);width:var(--p,8%)}
+.tleft{flex:none;min-width:58px;text-align:right;font:600 15px var(--rf);color:var(--mut)}
+.ebody{flex:1;display:flex;flex-direction:column;min-height:0;padding:0 16px;overflow:hidden;overflow:clip}
+.elabel{font:700 15px var(--rf);color:var(--mut);letter-spacing:.03em;text-transform:uppercase}
+.etitle{font:700 22px/1.2 var(--rf);margin:2px 0 4px}
+.ehint{font-size:15px;color:var(--mut)}
+.playrow{display:flex;gap:14px;justify-content:center;align-items:center;margin:8px 0 10px}
+.pbtn{display:grid;place-items:center;border:0;border-radius:50%;background:var(--card);color:var(--link);box-shadow:0 3px 0 var(--line);padding:0}
+.pbtn.big{width:84px;height:84px}.pbtn.mid{width:60px;height:60px}.pbtn.sm{width:48px;height:48px}
+.pbtn svg{width:46%;height:46%}
+.pbtn[data-state=playing]{background:var(--pri);color:var(--pri-tx);box-shadow:0 3px 0 var(--edge)}
+.pbtn[data-state=missing]{color:var(--mut);background:var(--soft);box-shadow:none}
+.vbtn{min-height:48px;border-radius:24px;padding:0 16px;font:600 16px var(--rf);border:0;background:var(--card);color:var(--tx);box-shadow:0 3px 0 var(--line);display:flex;align-items:center;gap:6px}
+.vbtn[data-state=playing]{background:var(--pri);color:var(--pri-tx);box-shadow:0 3px 0 var(--edge)}
+.vbtn[data-state=missing]{color:var(--mut);background:var(--soft);box-shadow:none;text-decoration:line-through}
+.opts{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.opts.two{grid-template-columns:1fr}
+.opt{position:relative;min-height:84px;border-radius:16px;border:2px solid var(--line);background:var(--card);padding:8px;font:600 18px/1.2 var(--rf);color:var(--tx);display:flex;flex-direction:column;align-items:center;justify-content:center;box-shadow:0 3px 0 var(--line)}
+.opts.two .opt{min-height:64px;font-size:19px}
+.opt[data-state=picked-right],.opt[data-state=reveal]{border-color:var(--ok);background:var(--ok-soft);color:var(--ok-ink)}
+.opt[data-state=picked-wrong]{border-color:var(--bad);background:var(--bad-soft);color:var(--bad-ink)}
+.opt[data-state=off]{color:var(--mut);border-color:var(--line)}
+.opt .mark{position:absolute;top:6px;right:10px;font-size:18px}
+.tones{display:flex;gap:10px;align-items:center;justify-content:center}
+.tn{display:flex;flex-direction:column;align-items:center;gap:0;font:700 15px var(--rf)}
+.tn svg{width:34px;height:34px}
+.t1{color:var(--t1)}.t2{color:var(--t2)}.t3{color:var(--t3)}.t4{color:var(--t4)}.t0{color:var(--t0)}
+.tg polyline,.tg path{fill:none;stroke:currentColor;stroke-width:2.8;stroke-linecap:round;stroke-linejoin:round}
+.tg .staff{stroke:currentColor;opacity:.35}
+.zone{flex:none;position:relative;min-height:212px;padding:8px 16px calc(8px + var(--bot));display:flex;flex-direction:column;justify-content:flex-end;gap:6px}
+.zone.low{min-height:0}
+.panel{position:absolute;left:0;right:0;bottom:0;min-height:100%;padding:12px 16px calc(12px + var(--bot));border-radius:20px 20px 0 0;display:flex;flex-direction:column;gap:6px}
+.panel.ok{background:var(--ok-soft)}.panel.bad{background:var(--bad-soft)}
+.panel .ttl{display:flex;align-items:center;justify-content:space-between;gap:8px;font:800 22px var(--rf);min-height:44px}
+.panel.ok .ttl{color:var(--ok-ink)}.panel.bad .ttl{color:var(--bad-ink)}
+.panel .ans{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.panel .ans .hz{font-size:24px}
+.panel .trap{font-size:15px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.panel .btn.main{margin-top:auto}
+.panel.ok .btn.main{background:var(--ok);color:var(--ok-tx);box-shadow:0 4px 0 #0E5A31}
+.panel.bad .btn.main{background:var(--bad);color:var(--bad-tx);box-shadow:0 4px 0 #8E1F1C}
+@keyframes up{from{opacity:.5}to{opacity:1}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+.newcard{display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center}
+.tzg{width:112px;height:112px;border:2px solid var(--line);border-radius:10px;display:grid;place-items:center;font:400 64px/1 var(--hzf);background:var(--card) linear-gradient(var(--line),var(--line)) center/1px 100% no-repeat;position:relative}
+.tzg.w2{width:180px;font-size:56px}.tzg.w3{width:240px;font-size:48px}.tzg.w4{width:300px;font-size:40px}
+.tzg::after{content:"";position:absolute;left:0;right:0;top:50%;border-top:1px dashed var(--line)}
+.py{font:600 24px var(--rf)}
+.ru{font-size:19px}
+.voices{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+.excard{display:flex;align-items:center;gap:10px;background:var(--card);border-radius:14px;padding:8px 10px;text-align:left;width:100%;box-shadow:0 2px 0 var(--line)}
+.excard .t{flex:1;font-size:15px}.excard .t .hz{font-size:19px}
+.tag{font-size:15px;color:var(--mut)}
+.phrase{font:400 40px/1.2 var(--hzf)}.phrase mark{background:var(--soft);color:var(--link);border-radius:6px;padding:0 4px}
+.prompt{background:var(--card);border-radius:18px;padding:18px;text-align:center;font:700 26px/1.2 var(--rf);box-shadow:0 2px 0 var(--line);margin:8px 0}
+.mic{width:88px;height:88px;border-radius:44px;border:0;background:var(--pri);color:var(--pri-tx);display:grid;place-items:center;align-self:center;box-shadow:0 4px 0 var(--edge)}
+.mic svg{width:40px;height:40px}
+.mic[data-state=recording]{background:var(--bad);color:var(--bad-tx);animation:pulse 1s infinite}
+@keyframes pulse{50%{box-shadow:0 0 0 12px rgba(201,48,44,.25)}}
+.level{display:flex;gap:4px;align-items:flex-end;justify-content:center;height:56px;margin:12px 0}
+.level i{width:10px;border-radius:5px;background:var(--pri);height:6px;transition:height .05s}
+.center{text-align:center}
+.graph{width:100%;height:118px;background:var(--card);border-radius:14px;display:block}
+.graph .axis{stroke:var(--line)}
+.graph .me{fill:none;stroke:var(--pri);stroke-width:3.5;stroke-linejoin:round;stroke-linecap:round}
+.graph .ref{fill:none;stroke:var(--mut);stroke-width:2.5;stroke-dasharray:6 5}
+.graph text{fill:var(--mut);font-size:15px}
+.legend{display:flex;gap:16px;font-size:15px;color:var(--mut);margin:4px 0}
+.legend .me::before,.legend .ref::before{content:"";display:inline-block;width:22px;margin-right:6px;vertical-align:middle;border-top:3px solid var(--pri)}
+.legend .ref::before{border-top:3px dashed var(--mut)}
+.brow{display:flex;gap:8px;margin:6px 0}.brow>*{flex:1}
+.grades{display:flex;gap:8px}.grades .btn{flex:1;min-height:56px;padding:0 6px;font-size:16px}
+.wordline{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin:4px 0}
+.wordline .hz{font-size:30px}
+.note{font-size:15px;color:var(--mut)}
+/* итог */
+.skills{display:grid;gap:10px;margin:12px 0}
+.skill{display:flex;justify-content:space-between;gap:10px;background:var(--card);border-radius:14px;padding:12px 14px;box-shadow:0 2px 0 var(--line)}
+.skill b{font-family:var(--rf)}
+/* настройки */
+.set{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:52px;padding:8px 0;border-bottom:1px solid var(--line)}
+.seg{display:flex;gap:6px}.seg .btn{min-height:44px;padding:0 10px;font-size:15px}
+.seg .btn[aria-pressed=true]{background:var(--pri);color:var(--pri-tx);box-shadow:0 3px 0 var(--edge)}
+.sw{min-width:64px}
+.sw[data-state=on]{background:var(--pri);color:var(--pri-tx);box-shadow:0 3px 0 var(--edge)}
+.ver{font-size:15px;color:var(--mut);padding:12px 0}
+.panel .pyp{font:600 20px var(--rf)}
+/* тоны на светлых панелях «Верно / Не так» — темнее, чтобы контраст ≥ 4,5 : 1 */
+html[data-theme=light] .panel{--t1:#A32C1F;--t2:#7F4F00;--t3:#1F6239;--t4:#2A4F9E;--t0:#555B59}
+.opt[data-state=picked-right] .tn,.opt[data-state=reveal] .tn,.opt[data-state=picked-wrong] .tn{color:inherit}
+.opt[data-state=off] .tn{color:var(--mut)}
+
+.panel .pbtn.sm{width:44px;height:44px}
+.panel .ans{min-height:0;line-height:1.2}
+
+.plate.warn{top:calc(var(--top) + 8px);bottom:auto;background:var(--bad);color:var(--bad-tx);z-index:80;font-weight:600}
+.erow{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:44px}
+.erow .btn.link{min-height:44px;padding:0 2px;font-size:15px;text-align:right;flex:none}
+.erow .elabel{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.excard .hz mark{background:var(--soft);color:var(--link);border-radius:6px;padding:0 3px}
+</style>
+<script>
+/* Каркас: тема, признаки и экраны 1.1–1.3 — до кода приложения, чтобы первый кадр не был пустым */
+(function () {
+  var d = document.documentElement, B = window.BOOT = { t0: Date.now(), ready: false, why: "", log: [] };
+  var th = "auto"; try { th = localStorage.getItem("zh2-theme") || "auto"; } catch (e) {}
+  var mm = function (q) { try { return window.matchMedia && matchMedia(q).matches; } catch (e) { return false; } };
+  var dark = th === "dark" || (th === "auto" && mm("(prefers-color-scheme: dark)"));
+  d.setAttribute("data-theme", dark ? "dark" : "light");
+  d.setAttribute("data-standalone", (navigator.standalone === true || mm("(display-mode: standalone)")) ? "true" : "false");
+  d.setAttribute("data-net", navigator.onLine === false ? "offline" : "online");
+  var tc = document.querySelector("meta[name=theme-color]"); if (tc) tc.setAttribute("content", dark ? "#121413" : "#B23A21");
+  var TEXT = {
+    timeout: "Сайт приложения не ответил за 20 секунд — в Китае так бывает без VPN.",
+    offline: "Нет интернета, а приложение ещё не успело сохраниться на телефоне.",
+    broken: "Данные повреждены — открой при сети (в Китае — с VPN) и нажми «Ещё раз».",
+    storage: "Нажми «Ещё раз». Не поможет — закрой приложение и открой снова."
+  };
+  function q(s) { return document.querySelector(s); }
+  function only(n) { var a = document.querySelectorAll("#app > [data-screen]"); for (var i = 0; i < a.length; i++) a[i].hidden = a[i].getAttribute("data-screen") !== n; }
+  function cached(cb) { try { caches.keys().then(function (k) { cb(k.some(function (x) { return x.indexOf("zh2-shell-") === 0; })); }, function () { cb(false); }); } catch (e) { cb(false); } }
+  B.progress = function (n) { var el = q("[data-test=loading]"); if (el) { el.setAttribute("data-n", n); el.querySelector("b").textContent = n + " из 3"; } var bar = q(".boot .bar i"); if (bar) bar.style.width = Math.round(n / 3 * 100) + "%"; };
+  B.err = function (kind) { B.why = kind || B.why; B.log.push(kind); };
+  B.done = function () { B.ready = true; clearTimeout(B.t8); clearTimeout(B.t20); };
+  B.slow = function () { if (B.ready) return; only("1.2"); cached(function (has) { q("[data-screen='1.2'] [data-test=open-cached]").hidden = !has; }); };
+  B.fail = function (force) {
+    if (B.ready) return;
+    B.failed = true; // дальше ждём «Ещё раз» — сами не перескакиваем
+    var r = force || (navigator.onLine === false ? "offline" : (B.why === "broken" ? "broken" : "timeout")), s = q("[data-screen='1.3']");
+    s.setAttribute("data-reason", r); q("[data-screen='1.3'] [data-test=reason]").textContent = TEXT[r]; only("1.3");
+    if (r === "broken") q("[data-screen='1.3'] h1").textContent = "Данные повреждены";
+    if (r === "storage") q("[data-screen='1.3'] h1").textContent = "Память телефона не открылась";
+    try { localStorage.setItem("zh2-bootfail", JSON.stringify({ t: Date.now(), r: r, log: B.log.slice(-5) })); } catch (e) {} // в журнал — при следующем запуске
+    cached(function (has) { q("[data-screen='1.3'] [data-test=open-cached]").hidden = !has; });
+  };
+  B.t8 = setTimeout(B.slow, 8000); B.t20 = setTimeout(B.fail, 20000);
+  document.addEventListener("click", function (e) {
+    var t = e.target && e.target.closest ? e.target.closest("[data-boot]") : null; if (!t) return;
+    var a = t.getAttribute("data-boot");
+    if (a === "retry" || a === "cached") location.reload();
+    if (a === "help") { var h = q("#bootHelp"); h.hidden = !h.hidden; }
+  });
+  window.addEventListener("error", function (e) { if (!B.ready && e && e.target && e.target.tagName === "SCRIPT") B.err("broken"); }, true);
+  if ("serviceWorker" in navigator) {
+    try { navigator.serviceWorker.register("sw.js", { scope: "./", updateViaCache: "none" }).then(function (r) { B.reg = r; }, function (e) { B.swErr = String((e && e.message) || e).slice(0, 120); }); } catch (e) { B.swErr = String(e).slice(0, 120); }
+  }
+})();
+</script>
 </head>
 <body>
-<div id="app">
-  <header class="top" id="top"></header>
-  <main id="view" class="view"></main>
-  <nav class="tabs" id="tabs" aria-label="Разделы">
-    <button data-tab="learn" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5V6a2 2 0 0 1 2-2h13v13H6.5A2.5 2.5 0 0 0 4 19.5zm0 0A2.5 2.5 0 0 0 6.5 22H19v-5"/></svg><span>Учиться</span></button>
-    <button data-tab="review"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg><span>Повторить</span><b class="badge" id="dueBadge" hidden></b></button>
-    <button data-tab="tones"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h4l4 10h4l4-10h2" /></svg><span>Слух</span></button>
-    <button data-tab="me"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg><span>Я</span></button>
-  </nav>
-</div>
-<section id="lesson" class="lesson" hidden aria-live="polite"></section>
-<section id="shadow" class="lesson shadow" hidden aria-live="polite"></section>
-<div id="sheet" class="sheet-wrap" hidden></div>
-<div id="toast" class="toast" role="status" hidden></div>
-<noscript>Нужен JavaScript.</noscript>
-<script src="app.js?v=af2059286c"></script>
+<div class="band" aria-hidden="true"></div>
+<main id="app">
+  <section class="scr boot" data-screen="1.1">
+    <div class="boot-c">
+      <div class="logo" aria-hidden="true">汉</div>
+      <h1>Китайский</h1>
+      <p data-test="loading" data-n="0" data-of="3">Загружаю уроки… <b>0 из 3</b></p>
+      <div class="bar"><i></i></div>
+    </div>
+    <div class="ghost" aria-hidden="true"><i class="g1"></i><i class="g2"></i><i class="g3"></i><i class="g4"></i></div>
+  </section>
+  <section class="scr boot" data-screen="1.2" hidden>
+    <div class="boot-c">
+      <div class="logo" aria-hidden="true">汉</div>
+      <h1>Связь медленная</h1>
+      <p class="mut">Жду ещё… Приложение качается в первый раз — дальше будет открываться из памяти телефона.</p>
+    </div>
+    <div class="foot">
+      <button type="button" class="btn main" data-test="retry" data-boot="retry">Ещё раз</button>
+      <button type="button" class="btn sec" data-test="open-cached" data-boot="cached" hidden>Открыть скачанное</button>
+    </div>
+  </section>
+  <section class="scr boot" data-screen="1.3" data-reason="timeout" hidden>
+    <div class="boot-c">
+      <div class="logo off" aria-hidden="true">☁︎</div>
+      <h1>Не загрузилось</h1>
+      <p data-test="reason">Сайт приложения не ответил за 20 секунд — в Китае так бывает без VPN.</p>
+      <div id="bootHelp" class="help" hidden><p>1. Включи VPN или Wi-Fi.</p><p>2. Нажми «Ещё раз».</p><p>3. Не помогло — открой позже.</p></div>
+    </div>
+    <div class="foot">
+      <button type="button" class="btn main" data-test="retry" data-boot="retry">Ещё раз</button>
+      <button type="button" class="btn sec" data-test="open-cached" data-boot="cached" hidden>Открыть скачанное</button>
+      <button type="button" class="btn link" data-test="help" data-boot="help">Что делать?</button>
+    </div>
+  </section>
+</main>
+<div id="ov"></div>
+<div id="toast" class="toast" data-test="toast" role="status" hidden></div>
+<audio id="aud" playsinline preload="auto"></audio>
+<audio id="aud2" playsinline></audio>
+<script src="app.js" defer></script>
 </body>
 </html>
