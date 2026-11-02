@@ -2,14 +2,13 @@
 (() => {
 "use strict";
 /* ===== core: константы, мелочи, пиньинь, журнал (IndexedDB), повторение (ТЗ 4.4), план дня (ТЗ 2.2) ===== */
-const VERSION = "3091576aae";
-/* Громкость речи после записи голоса — ОДНА константа, ведущий ставит победителя пробы 2:
-   "modes"  — audioSession "play-and-record" до записи и "playback" после (пауза 0,5 с), речь — тем же <audio>;
-   "stream" — речь всегда через Web Audio → MediaStream → второй <audio>;
-   "gain2"  — после первой записи речь через Web Audio с усилением ×2 и ограничителем;
-   "mr"     — запись через MediaRecorder без AudioContext, пауза 2,5 с, после записи — новый плеер;
-   "none"   — ничего особого. */
-const AFTER_REC = "modes";
+const VERSION = "152342241e";
+/* Громкость речи после записи голоса — ОДНА константа (проба 2 на iPhone хозяина, 02.11: победил gain2):
+   "gain2" — после первой записи (и 10 минут после неё, даже после перезапуска страницы) речь через Web Audio ×2 с ограничителем;
+   "mr"    — запись через MediaRecorder без AudioContext, пауза 2,5 с, после записи — новый плеер;
+   "none"  — ничего особого.
+   Режим звука iPhone: перед каждой записью "play-and-record", после — "auto"; "playback" не ставим никогда (ломал следующие записи). */
+const AFTER_REC = "gain2";
 const MIN = 60000, DAY_MS = 86400000;
 const STEPS = [1, 3, 7, 14, 30, 60, 120];
 const PARTS = { warmup: "Разминка", review: "Повторение", check: "Проверка урока", new: "Новое", tones: "Тоны", recall: "Скажи по памяти" };
@@ -465,7 +464,6 @@ const Player = {
       if (!Player.pend) { el.src = Player.silent; el.removeAttribute("data-src"); const p = el.play(); Player.track(p); }
     } catch (e) {}
     try { const A = AC(); if (A && !Player.ctx) Player.ctx = new A(); if (Player.ctx && Player.ctx.state !== "running") Player.ctx.resume().catch(() => {}); } catch (e) {}
-    if (AFTER_REC === "modes") setSession("playback");
   },
   mark(btn, state) { if (btn && btn.isConnected !== false) btn.setAttribute("data-state", state); },
   pend: null,
@@ -487,16 +485,12 @@ const Player = {
     Player.stop();
     const tok = Player.tok, btn = opts.btn || null;
     Player.btn = btn; Player.mark(btn, "playing");
-    const useWA = AFTER_REC === "stream" || (AFTER_REC === "gain2" && Player.recDone);
+    const useWA = AFTER_REC === "gain2" && Player.recDone;
     let ctx = null;
     const prep = { dest: null, el2: null, err: null, fresh: null }; // плеер запускаем прямо в касании, звук подставим потом (как в пробе 2)
     if (useWA) {
       try {
         const A = AC(); ctx = new A(); const r = ctx.resume(); if (r && r.catch) r.catch(() => {});
-        if (AFTER_REC === "stream") {
-          prep.dest = ctx.createMediaStreamDestination(); prep.el2 = $("#aud2"); prep.el2.srcObject = prep.dest.stream;
-          const pp = prep.el2.play(); if (pp && pp.catch) pp.catch(e => { prep.err = e; });
-        }
       } catch (e) { ctx = null; }
     }
     if (AFTER_REC === "mr" && Player.recDone && !ctx) {
@@ -575,6 +569,7 @@ const Player = {
   }
 };
 
+try { if (Date.now() - (+localStorage.getItem("zh2-rec-at") || 0) < 10 * 60000) Player.recDone = true; } catch (e) {}
 /* ---------- запись голоса ---------- */
 const Mic = {
   stopNow: null, recording: false, diag: null,
@@ -585,15 +580,22 @@ const Mic = {
     Player.stop();
     try { if (Player.ctx && Player.ctx.state === "running") Player.ctx.suspend().catch(() => {}); } catch (e) {} // «дзынь» на время записи — молчит
     const t0 = performance.now(), cons = { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } };
-    if (AFTER_REC === "modes") setSession("play-and-record");
+    setSession("play-and-record"); // перед каждой записью (проба 2)
     let stream = null, ctx = null, rate = 48000, chunks = [], levels = [], peak = 0, mr = null, mrChunks = [];
     const stopper = new Promise(r => { Mic.stopNow = r; });
     Mic.recording = true;
     try {
       if (AFTER_REC !== "mr") { const A = AC(); if (!A) throw { reason: "no-mic", err: "нет AudioContext" }; ctx = new A(); diag.ctx0 = ctx.state; try { ctx.resume().catch(() => {}); } catch (e) {} }
-      const g = navigator.mediaDevices.getUserMedia(cons);
-      try { stream = await Promise.race([g, sleep(30000).then(() => { g.then(s => s.getTracks().forEach(t => t.stop()), () => {}); throw Object.assign(new Error("нет ответа 30 с"), { name: "AbortError" }); })]); } // разрешение пришло поздно — дорожки сразу стоп
-      catch (e) { const n = e && e.name; diag.name = n || errText(e); diag.sess = sessNow(); throw { reason: n === "NotAllowedError" || n === "SecurityError" ? "denied" : "no-mic", err: errText(e) }; }
+      const gum = () => { const g = navigator.mediaDevices.getUserMedia(cons); return Promise.race([g, sleep(30000).then(() => { g.then(s => s.getTracks().forEach(t => t.stop()), () => {}); throw Object.assign(new Error("нет ответа 30 с"), { name: "AbortError" }); })]); }; // разрешение пришло поздно — дорожки сразу стоп
+      try { stream = await gum(); }
+      catch (e0) {
+        let e = e0;
+        if (e0 && e0.name === "InvalidStateError") { // «AudioSession category is not compatible with audio capture» — режим звука застрял: ставим запись и пробуем ещё раз
+          diag.retry = 1; setSession("play-and-record"); await sleep(300);
+          try { stream = await gum(); e = null; } catch (e1) { e = e1; }
+        }
+        if (e) { const n = e && e.name; diag.name = n || errText(e); diag.sess = sessNow(); throw { reason: n === "NotAllowedError" || n === "SecurityError" ? "denied" : n === "InvalidStateError" ? "busy" : "no-mic", err: errText(e) }; }
+      }
       diag.sess = sessNow();
       if (AFTER_REC === "mr") {
         if (!window.MediaRecorder) throw { reason: "no-mic", err: "нет MediaRecorder" };
@@ -634,8 +636,9 @@ const Mic = {
       try { stream && stream.getTracks().forEach(t => t.stop()); } catch (e) {}
       try { ctx && ctx.close(); } catch (e) {}
       try { if (Player.ctx && Player.ctx.state === "suspended") Player.ctx.resume().catch(() => {}); } catch (e) {}
-      Player.recDone = true;
-      if (AFTER_REC === "modes") { Player.waitUntil = Date.now() + 500; setTimeout(() => setSession("playback"), 450); }
+      setSession("auto"); // после записи — "auto"; "playback" не ставим никогда
+      Player.recDone = true; Player.waitUntil = Date.now() + 350;
+      try { localStorage.setItem("zh2-rec-at", String(Date.now())); } catch (e) {} // «недавно писал»: после перезапуска в пределах 10 минут — тоже ×2
       if (AFTER_REC === "mr") Player.waitUntil = Date.now() + 2500;
     }
     let pcm;
@@ -1204,7 +1207,7 @@ async function startRec(q, pt) {
   } catch (e) {
     const why = e && e.reason ? e.reason : "no-mic", d = Mic.diag || {};
     if (!(e && e.reason) && !d.name) d.name = errText(e); // ошибка программы, а не отказ iPhone
-    const code = [d.name || "—", "ctx " + (d.ctx0 || "?") + "→" + (d.ctx || "?"), "сессия " + (d.sess || "?"), "отсчётов " + (d.n || 0) + " (" + (d.chunks || 0) + ")", d.wl, d.rate ? d.rate + " Гц" : "", d.peak != null ? "пик " + d.peak : ""].filter(Boolean).join(" · ");
+    const code = [d.name || "—", "ctx " + (d.ctx0 || "?") + "→" + (d.ctx || "?"), "сессия " + (d.sess || "?"), "отсчётов " + (d.n || 0) + " (" + (d.chunks || 0) + ")", d.retry ? "повтор" : "", d.wl, d.rate ? d.rate + " Гц" : "", d.peak != null ? "пик " + d.peak : ""].filter(Boolean).join(" · ");
     commit([{ k: "M", t: Date.now(), why, e: e && e.err ? String(e.err).slice(0, 120) : errText(e), code }]);
     showMicTrouble(q, pt, why, code);
   }
@@ -1212,6 +1215,7 @@ async function startRec(q, pt) {
 const MIC_TXT = {
   denied: ["Нет доступа к микрофону", "iPhone спросит ещё раз — нажми «Разрешить». Не спрашивает? Настройки → Safari → Микрофон → «Спрашивать»."],
   "no-mic": ["Микрофон не нашёлся или занят", "Закончи звонок или диктофон и нажми «Ещё раз». В WeChat и Telegram микрофон не работает — открой «Китайский» с экрана «Домой»."],
+  busy: ["Микрофон сейчас не включается", "Закрой приложение смахиванием вверх и открой снова. Не помогло — закончи звонок или диктофон и нажми «Ещё раз»."],
   silent: ["Ничего не услышал", "Нажми, дождись, пока кнопка станет красной, и скажи слово целиком. Держи телефон сантиметрах в 20 от рта."]
 };
 function showMicTrouble(q, pt, why, code) {
