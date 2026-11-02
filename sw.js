@@ -3,7 +3,7 @@
    берёт открытые окна (clients.claim); окна старого приложения перезагружает сразу, окна v2 — сами решают когда
    (не посреди занятия). Страницу отдаёт новым ответом из байтов кэша — без пометки «перенаправлен» (проба 30.10).
    Журнал (IndexedDB «zh2-swlog»): вызывали ли его при запуске и что он отдал — уходит Claude в пакете. */
-const V = "2e1ccd9278";
+const V = "3091576aae";
 const SHELL_CACHE = "zh2-shell-" + V;
 const SND_CACHE = "zh2-snd"; // звук уроков: кладёт страница, переживает обновления версии
 const SHELL = ["./", "index.html", "app.js", "worklet.js", "manifest.webmanifest", "data/words.json", "icons/icon-180.png", "icons/icon-192.png", "icons/icon-512.png"];

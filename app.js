@@ -2,7 +2,7 @@
 (() => {
 "use strict";
 /* ===== core: константы, мелочи, пиньинь, журнал (IndexedDB), повторение (ТЗ 4.4), план дня (ТЗ 2.2) ===== */
-const VERSION = "2e1ccd9278";
+const VERSION = "3091576aae";
 /* Громкость речи после записи голоса — ОДНА константа, ведущий ставит победителя пробы 2:
    "modes"  — audioSession "play-and-record" до записи и "playback" после (пауза 0,5 с), речь — тем же <audio>;
    "stream" — речь всегда через Web Audio → MediaStream → второй <audio>;
@@ -577,20 +577,24 @@ const Player = {
 
 /* ---------- запись голоса ---------- */
 const Mic = {
-  stopNow: null, recording: false,
+  stopNow: null, recording: false, diag: null,
   async record(maxMs, onLevel) {
-    if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) throw { reason: "no-mic", err: "нет mediaDevices" };
+    const diag = Mic.diag = { name: "", ctx0: "", ctx: "", sess: "", n: 0, chunks: 0, wl: "", rate: 0, peak: null }; // код для снимка экрана и журнала
+    const sessNow = () => { try { return navigator.audioSession ? navigator.audioSession.type + (navigator.audioSession.state ? "/" + navigator.audioSession.state : "") : "нет"; } catch (e) { return "?"; } };
+    if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) { diag.name = "нет mediaDevices"; throw { reason: "no-mic", err: "нет mediaDevices" }; }
     Player.stop();
+    try { if (Player.ctx && Player.ctx.state === "running") Player.ctx.suspend().catch(() => {}); } catch (e) {} // «дзынь» на время записи — молчит
     const t0 = performance.now(), cons = { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } };
     if (AFTER_REC === "modes") setSession("play-and-record");
     let stream = null, ctx = null, rate = 48000, chunks = [], levels = [], peak = 0, mr = null, mrChunks = [];
     const stopper = new Promise(r => { Mic.stopNow = r; });
     Mic.recording = true;
     try {
-      if (AFTER_REC !== "mr") { const A = AC(); if (!A) throw { reason: "no-mic", err: "нет AudioContext" }; ctx = new A(); try { ctx.resume().catch(() => {}); } catch (e) {} }
+      if (AFTER_REC !== "mr") { const A = AC(); if (!A) throw { reason: "no-mic", err: "нет AudioContext" }; ctx = new A(); diag.ctx0 = ctx.state; try { ctx.resume().catch(() => {}); } catch (e) {} }
       const g = navigator.mediaDevices.getUserMedia(cons);
       try { stream = await Promise.race([g, sleep(30000).then(() => { g.then(s => s.getTracks().forEach(t => t.stop()), () => {}); throw Object.assign(new Error("нет ответа 30 с"), { name: "AbortError" }); })]); } // разрешение пришло поздно — дорожки сразу стоп
-      catch (e) { const n = e && e.name; throw { reason: n === "NotAllowedError" || n === "SecurityError" ? "denied" : "no-mic", err: errText(e) }; }
+      catch (e) { const n = e && e.name; diag.name = n || errText(e); diag.sess = sessNow(); throw { reason: n === "NotAllowedError" || n === "SecurityError" ? "denied" : "no-mic", err: errText(e) }; }
+      diag.sess = sessNow();
       if (AFTER_REC === "mr") {
         if (!window.MediaRecorder) throw { reason: "no-mic", err: "нет MediaRecorder" };
         mr = new MediaRecorder(stream); const stopped = new Promise(r => { mr.onstop = r; });
@@ -601,21 +605,24 @@ const Mic = {
         mr.stop(); await Promise.race([stopped, sleep(3000)]);
       } else {
         if (ctx.state !== "running") { try { await Promise.race([ctx.resume(), sleep(1500)]); } catch (e) {} }
-        rate = ctx.sampleRate;
+        diag.ctx = ctx.state; rate = diag.rate = ctx.sampleRate;
         const src = ctx.createMediaStreamSource(stream), sink = ctx.createGain(); sink.gain.value = 0; sink.connect(ctx.destination);
-        let heard = false, lastLoud = 0;
+        let heard = false, lastLoud = 0, loudRun = 0, tRec = 0;
         const take = (pcm, rms, pk) => {
           chunks.push(pcm); levels.push(rms); if (pk > peak) peak = pk; if (onLevel) onLevel(rms);
-          const now = performance.now(); // сама останавливается после ~0,8 с тишины после голоса
-          if (rms > 0.012) { heard = true; lastLoud = now; } else if (heard && now - lastLoud > 800 && Mic.stopNow) Mic.stopNow();
+          // сама останавливается после ~0,8 с тишины ПОСЛЕ голоса: щелчок включения микрофона (первые 350 мс) и одиночный всплеск голосом не считаются,
+          // голос — не короче 150 мс подряд; раньше 1,2 с от начала не останавливаемся (человек не успевает начать говорить)
+          const now = performance.now(); if (!tRec) tRec = now;
+          if (rms > 0.015 && now - tRec > 350) { loudRun++; if (loudRun >= 3) heard = true; if (heard) lastLoud = now; } else loudRun = 0;
+          if (heard && now - lastLoud > 800 && now - tRec > 1200 && Mic.stopNow) Mic.stopNow();
         };
         let node = null;
         try {
           await Promise.race([ctx.audioWorklet.addModule("worklet.js"), sleep(3000).then(() => { throw new Error("worklet за 3 с не загрузился"); })]);
-          node = new AudioWorkletNode(ctx, "rec");
+          node = new AudioWorkletNode(ctx, "rec"); diag.wl = "worklet";
           node.port.onmessage = ev => take(ev.data.pcm, ev.data.rms, ev.data.peak);
         } catch (e) { // запасной путь без AudioWorklet
-          node = ctx.createScriptProcessor(2048, 1, 1);
+          node = ctx.createScriptProcessor(2048, 1, 1); diag.wl = "sp: " + errText(e).slice(0, 40);
           node.onaudioprocess = ev => { const d = new Float32Array(ev.inputBuffer.getChannelData(0)); let s = 0, pk = 0; for (const x of d) { s += x * x; const a = Math.abs(x); if (a > pk) pk = a; } take(d, Math.sqrt(s / d.length), pk); };
         }
         src.connect(node); node.connect(sink);
@@ -626,6 +633,7 @@ const Mic = {
       Mic.recording = false; Mic.stopNow = null;
       try { stream && stream.getTracks().forEach(t => t.stop()); } catch (e) {}
       try { ctx && ctx.close(); } catch (e) {}
+      try { if (Player.ctx && Player.ctx.state === "suspended") Player.ctx.resume().catch(() => {}); } catch (e) {}
       Player.recDone = true;
       if (AFTER_REC === "modes") { Player.waitUntil = Date.now() + 500; setTimeout(() => setSession("playback"), 450); }
       if (AFTER_REC === "mr") Player.waitUntil = Date.now() + 2500;
@@ -639,6 +647,8 @@ const Mic = {
       let n = 0; for (const c of chunks) n += c.length;
       pcm = new Float32Array(n); let o = 0; for (const c of chunks) { pcm.set(c, o); o += c.length; }
     }
+    diag.n = pcm.length; diag.chunks = chunks.length || levels.length; diag.peak = Math.round(peak * 1000) / 1000;
+    if (!mr && !chunks.length) throw { reason: "silent", err: "0 отсчётов: микрофон не дал звук (AudioContext " + diag.ctx + ")" };
     const voiced = levels.filter(r => r > 0.006).length; // ≈ −45 дБ
     const ms = Math.round(performance.now() - t0);
     if (peak < 0.015 || voiced < 3) throw { reason: "silent", err: "пик " + peak.toFixed(3) + ", голос " + voiced + " кусков" };
@@ -1192,9 +1202,11 @@ async function startRec(q, pt) {
     Run.rec = rec;
     showSayResult(q, pt, rec);
   } catch (e) {
-    const why = e && e.reason ? e.reason : "no-mic";
-    commit([{ k: "M", t: Date.now(), why, e: e && e.err ? String(e.err).slice(0, 120) : errText(e) }]);
-    showMicTrouble(q, pt, why);
+    const why = e && e.reason ? e.reason : "no-mic", d = Mic.diag || {};
+    if (!(e && e.reason) && !d.name) d.name = errText(e); // ошибка программы, а не отказ iPhone
+    const code = [d.name || "—", "ctx " + (d.ctx0 || "?") + "→" + (d.ctx || "?"), "сессия " + (d.sess || "?"), "отсчётов " + (d.n || 0) + " (" + (d.chunks || 0) + ")", d.wl, d.rate ? d.rate + " Гц" : "", d.peak != null ? "пик " + d.peak : ""].filter(Boolean).join(" · ");
+    commit([{ k: "M", t: Date.now(), why, e: e && e.err ? String(e.err).slice(0, 120) : errText(e), code }]);
+    showMicTrouble(q, pt, why, code);
   }
 }
 const MIC_TXT = {
@@ -1202,9 +1214,10 @@ const MIC_TXT = {
   "no-mic": ["Микрофон не нашёлся или занят", "Закончи звонок или диктофон и нажми «Ещё раз». В WeChat и Telegram микрофон не работает — открой «Китайский» с экрана «Домой»."],
   silent: ["Ничего не услышал", "Нажми, дождись, пока кнопка станет красной, и скажи слово целиком. Держи телефон сантиметрах в 20 от рта."]
 };
-function showMicTrouble(q, pt, why) {
+function showMicTrouble(q, pt, why, code) {
   const t = MIC_TXT[why] || MIC_TXT["no-mic"];
-  const kids = [h("div", { class: "etitle", text: "Микрофон" }), h("div", { class: "card" }, h("h2", { test: "reason", text: t[0] }), h("p", { class: "line", test: "help", text: t[1] }))];
+  const kids = [h("div", { class: "etitle", text: "Микрофон" }), h("div", { class: "card" }, h("h2", { test: "reason", text: t[0] }), h("p", { class: "line", test: "help", text: t[1] }),
+    code ? h("p", { class: "note", test: "mic-code", style: "margin-top:8px;word-break:break-word", text: "Код для Claude: " + code }) : null)];
   const zone = h("div", { class: "zone low" },
     h("button", { type: "button", class: "btn main", test: "retry", text: "Ещё раз", onclick: () => startRec(q, pt) }),
     h("button", { type: "button", class: "btn sec", test: "skip-rec", text: "Пропустить запись", onclick: () => showSayResult(q, pt, null) }));
