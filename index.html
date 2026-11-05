@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ru" data-theme="light" data-standalone="false" data-net="online" data-version="de78ceddd2">
+<html lang="ru" data-theme="light" data-standalone="false" data-net="online" data-version="c6cb87b6a5">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
@@ -194,6 +194,14 @@ html[data-theme=light] .panel{--t1:#A32C1F;--t2:#7F4F00;--t3:#1F6239;--t4:#2A4F9
 
 .panel .pbtn.sm{width:44px;height:44px}
 .panel .ans{min-height:0;line-height:1.2}
+/* панель «Верно / Не так» не выше низа вариантов (проверка 22): fitPanel() в ui.js добавляет по шагу, пока не влезет — длинный перевод (了, 吧, 口…) + заметка в 2 строки давали ~250 px при месте 212 */
+.panel.fit1{gap:4px;padding-top:8px}.panel.fit1 .trap{-webkit-line-clamp:1}
+.panel.fit2 .ans{gap:2px 8px}.panel.fit2 .ans .hz{font-size:20px}.panel.fit2 .pyp{font-size:17px}.panel.fit2 .ans>span:last-child{font-size:15px}
+.panel.fit3 .trap{display:none}
+/* варианты не заходят под место панели (проверка 22): перевод 了 / 吧 в 4 строки на 375×667 опускал нижний ряд на 21 px под место. На низких экранах кнопка звука меньше (+24 px); не хватило — fitQ() в ui.js: варианты мельче, потом без подсказки */
+@media (max-height:700px){.ex .playrow{margin:4px 0 6px}.ex .playrow .pbtn.big{width:68px;height:68px}}
+.ex.q1 .opt{font-size:16px;line-height:1.15;padding:6px}
+.ex.q2 .ehint{display:none}
 
 .plate.warn{top:calc(var(--top) + 8px);bottom:auto;background:var(--bad);color:var(--bad-tx);z-index:80;font-weight:600}
 .erow{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:44px}

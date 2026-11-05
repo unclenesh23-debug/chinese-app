@@ -2,7 +2,7 @@
 (() => {
 "use strict";
 /* ===== core: константы, мелочи, пиньинь, журнал (IndexedDB), повторение (ТЗ 4.4), план дня (ТЗ 2.2) ===== */
-const VERSION = "de78ceddd2";
+const VERSION = "c6cb87b6a5";
 /* Громкость речи после записи голоса — ОДНА константа (проба 2 на iPhone хозяина, 02.11: победил gain2):
    "gain2" — после первой записи (и 10 минут после неё, даже после перезапуска страницы) речь через Web Audio ×2 с ограничителем;
    "mr"    — запись через MediaRecorder без AudioContext, пауза 2,5 с, после записи — новый плеер;
@@ -404,7 +404,7 @@ function buildPart(p, plan, sess) {
     pool = pool.map(id => [(ST.w[id] ? ST.w[id].tx * 2 : 0) + Math.random() * 3, id]).sort((a, b) => b[0] - a[0]).map(x => x[1]);
     const n = Math.min(plan.kind === "save" ? 6 : plan.kind === "soft" ? 8 : 12, pool.length);
     const cur = lessonOf(L), passed = id => { const l = lessonOf(W(id).l); return !!(l && cur && l.book === cur.book && l.n <= cur.n); };
-    const pairs = shuffle(PAIRS.filter(([a, b]) => ok(a) && ok(b) && passed(a) && passed(b) && (ST.w[a] || ST.w[b]))).slice(0, plan.kind === "save" ? 0 : 3); // только пройденные уроки (М2)
+    const pairs = shuffle(PAIRS.filter(([a, b]) => ok(a) && ok(b) && !W(a).c && !W(b).c && passed(a) && passed(b) && (ST.w[a] || ST.w[b]))) /* «сверить» — ни загаданным, ни вторым словом пары (круг 3, мелочь 6) */.slice(0, plan.kind === "save" ? 0 : 3); // только пройденные уроки (М2)
     pairs.forEach(([a, b]) => { const w = Math.random() < 0.5 ? a : b; const o = shuffle([a, b]); out.push({ x: "4.4", w, p, o, c: o.indexOf(w) }); });
     pool.slice(0, Math.max(0, n - pairs.length)).forEach(id => out.push(toneQ(id, p)));
   } else if (p === "recall") {
@@ -429,7 +429,14 @@ function fetchT(url, ms, opts) {
   return fetch(url, Object.assign({ signal: ac ? ac.signal : undefined }, opts || {})).finally(() => clearTimeout(t));
 }
 const absUrl = u => new URL(u, location.href).href;
-const SND_FAILED = new Set();
+const SND_FAILED = new Map(); // адрес клипа → время отказа; пометка не навсегда (мелочь 6): по сети и при возврате из фона старше SND_RETRY снимается
+const SND_RETRY = 10 * 60 * 1000;
+function sndRetryOld(lids) { // снять пометки «битый» старше 10 минут — только у клипов уроков, которые перекачает downloadSoon; сколько снято
+  // слово старого урока остаётся «недоступен» до перезапуска: иначе посреди занятия оно покажет 3.5 вместо тихого пропуска (круг 3, мелочь 5)
+  let n = 0; const t = Date.now(), mine = new Set(); for (const l of lids || []) for (const u of Snd.lessonClips(l)) mine.add(absUrl(u));
+  for (const [a, at] of SND_FAILED) if (t - at >= SND_RETRY && mine.has(a)) { SND_FAILED.delete(a); n++; }
+  return n;
+}
 async function isMp3(b) { // в начале ID3 или кадр MPEG; иначе файл битый (страница ошибки, мусор с кодом 200)
   try { const x = new Uint8Array(await b.slice(0, 3).arrayBuffer()); return x.length === 3 && ((x[0] === 0x49 && x[1] === 0x44 && x[2] === 0x33) || (x[0] === 0xFF && (x[1] & 0xE0) === 0xE0)); } catch (e) { return true; }
 }
@@ -448,9 +455,9 @@ let sndLogged = 0;
 function sndFail(u, why) { // один повтор на клип, потом «недоступен» до следующего запуска; в журнал — одна запись на клип
   const a = absUrl(u);
   if (SND_FAILED.has(a)) return;
-  SND_FAILED.add(a);
+  SND_FAILED.set(a, Date.now());
   if (sndLogged++ >= 100) return;
-  const ev = { k: "E", t: Date.now(), m: "звук недоступен до перезапуска: " + a.replace(/^.*?(snd\/)/, "$1").split("?")[0] + " (" + why + ")" };
+  const ev = { k: "E", t: Date.now(), m: "звук недоступен (повтор через 10 мин при сети или возврате в приложение): " + a.replace(/^.*?(snd\/)/, "$1").split("?")[0] + " (" + why + ")" };
   try { if (DB.db || DB.mem) DB.commit([ev], {}).catch(() => {}); } catch (e) {}
 }
 const Snd = {
@@ -749,7 +756,8 @@ const Mic = {
       pcm = new Float32Array(n); let o = 0; for (const c of chunks) { pcm.set(c, o); o += c.length; }
     }
     diag.n = pcm.length; diag.chunks = chunks.length || levels.length; diag.peak = Math.round(peak * 1000) / 1000;
-    if (!mr && !chunks.length) throw { reason: "silent", err: "0 отсчётов: микрофон не дал звук (AudioContext " + diag.ctx + ")" };
+    // 0 отсчётов: звук телефона не запустился (AudioContext не running — после звонка, Siri) → stuck «закрой и открой», а не silent «держи ближе» (мелочь 5)
+    if (!mr && !chunks.length) throw { reason: diag.ctx && diag.ctx !== "running" ? "stuck" : "silent", err: "0 отсчётов: микрофон не дал звук (AudioContext " + diag.ctx + ")" };
     const ms = Math.round(performance.now() - t0);
     const v = await micVerdict(pcm, rate, levels, peak); // разбор кусками с передышками: ответ ≤ 1 с и при замедлении ×4
     diag.lvl = v.code;
@@ -975,7 +983,10 @@ function planLines(plan) {
   const L = plan.L, n = lessonNum(L), out = [];
   if (plan.parts.includes("review") && plan.review) out.push("Повторение · " + plan.review);
   if (plan.parts.includes("check")) out.push("Проверка урока " + n + " · 2–3 мин");
-  if (plan.parts.includes("new")) out.push(plan.onlyReview ? "Сегодня только повторение" : "Новые слова урока " + n + " · до " + Math.max(1, plan.newN));
+  if (plan.parts.includes("new")) { // 0 новых (все слова урока уже были — карточка 2.5) — строки нет; урок битый (3б) — честно, из какого урока новые
+    if (plan.onlyReview) out.push("Сегодня только повторение");
+    else if (plan.newN > 0) out.push("Новые слова урока " + lessonNum(newLesson(L) || L) + " · до " + plan.newN);
+  }
   out.push("Тоны на слух · 10–15");
   out.push(micOff() ? "Скажи по памяти — микрофон выключен на час" : "Скажи по памяти · 3–5");
   return out;
@@ -1019,7 +1030,7 @@ function renderToday() {
     const k = lessonNum(catchupLesson());
     body.append(h("div", { class: "prog", test: "catchup-line", "data-lesson": k, "data-of": ls.length }, h("span", { text: (scr === "2.7" ? "Пока догоняю 1上 · урок " : "Догоняю 1上 · урок ") + k + " из " + ls.length }), bar(k - 1, ls.length)));
   }
-  if (L && scr !== "2.3" && lessonBroken(L)) body.append(h("p", { class: "line", test: "lesson-broken", "data-lesson": lessonNum(L), text: "Урок " + lessonNum(L) + " не скачался целиком — новые слова возьму из соседнего. Скачаю заново при следующем запуске с сетью." }));
+  if (L && scr !== "2.3" && lessonBroken(L)) body.append(h("p", { class: "line", test: "lesson-broken", "data-lesson": lessonNum(L), text: "Урок " + lessonNum(L) + " не скачался целиком — новые слова возьму из соседнего. Попробую скачать ещё раз позже." }));
   const ask = scr === "2.1" && mode === "lesson" ? lessonAsk(L, d) : null;
   if (ask) body.append(ask);
   const due = scr === "2.4" ? 0 : dueList(d).length - (scr === "2.3" ? 0 : plan.review); // 2.4 — без цифр долга
@@ -1043,18 +1054,18 @@ function renderToday() {
       h("p", { class: "line", text: "Пока занимаемся повторением, тонами и догоняем 1上." })));
     card = scr === "2.4"
       ? h("div", { class: "card" }, h("h2", { text: "С возвращением!" }),
-        h("p", { class: "line", test: "away", "data-days": away, text: "Не было " + away + " " + plural(away, "день", "дня", "дней") + " — ничего страшного. Начнём мягко: 10 минут, только самое нужное." }),
+        h("p", { class: "line", test: "away", "data-days": away, text: "Тебя не было " + away + " " + plural(away, "день", "дня", "дней") + " — ничего страшного. Начнём мягко: 10 минут, только самое нужное." }),
         h("button", { type: "button", class: "btn main", test: "start", "data-min": 10, text: "Начать · 10 минут", onclick: () => beginDay("soft") }))
       : h("div", { class: "card" }, h("h2", { text: "Занятие на 15 минут" }), h("ul", { class: "plan" }, planLines(plan).map(t => h("li", { text: t }))),
         h("button", { type: "button", class: "btn main", test: "start", "data-min": 15, text: "Начать · 15 минут", onclick: () => beginDay("day") }));
   }
   body.append(card);
-  if (scr === "2.1" || scr === "2.7") body.append(h("button", { type: "button", class: "row", test: "save-day", "data-min": 5, onclick: () => beginDay("save") }, h("span", { text: "Нет времени? 5 минут, чтобы не рвать серию" }), h("span", { class: "chev", text: "›" })));
+  if (scr === "2.1" || scr === "2.7" || scr === "2.4") body.append(h("button", { type: "button", class: "row", test: "save-day", "data-min": 5, onclick: () => beginDay("save") }, h("span", { text: scr === "2.4" ? "Нет времени? 5 минут" : "Нет времени? 5 минут, чтобы не рвать серию" }), h("span", { class: "chev", text: "›" }))); // 2.4 — тоже (ТЗ 7.1, № 4); серия там уже прервалась — без «не рвать серию»
   if (due > 0) body.append(h("p", { class: "line", test: "due", "data-n": due, text: (scr === "2.3" ? "Ждут повторения: " : "И ещё ") + due + " " + plural(due, "слово", "слова", "слов") + (scr === "2.3" ? " — завтра." : " ждут повторения — возьмём завтра.") }));
   const ps = L ? Snd.state(L) : null;
   if (ps && ps.n < ps.of) body.append(h("p", { class: "line", test: "pack", "data-n": ps.n, "data-of": ps.of, text: "Звук урока " + lessonNum(L) + (navigator.onLine === false ? ": скачан на " : " качается… ") + Math.round(ps.n / Math.max(1, ps.of) * 100) + " %" }));
   mount(h("section", { class: "scr tabbed", "data-screen": scr, "data-tab": "today" }, body, tabs("today")));
-  if (UI.updated) { const v = UI.updated; UI.updated = null; showUpdated(v); }
+  if (ST.upd && !UI.inSession) { const u = ST.upd; ST.upd = null; commit([]); UI.added = u.add; showUpdated(u.v); } // 1.9 — один раз и вне занятия (на 2.2 хозяин ещё не в занятии — проверка 8б); ждёт в памяти телефона (круг 3, №1)
   if (scr === "2.3") prebuildPack();
   if (UI.reloadPending && scr === "2.3") setTimeout(() => { if (UI.reloadPending && calmSpot()) reloadNow(); }, 3200); // 8б: обновление — на 2.3 без открытых листов
 }
@@ -1171,7 +1182,8 @@ function nextQuestion() {
     }
     const q = pt.q[pt.i];
     const listen = q.x === "4.8" || q.x === "4.3" || q.x === "4.4";
-    if ((listen && listenOff()) || (q.x === "4.9" && micOff()) || !W(q.w) || (q.o && q.x !== "4.3" && q.o.some(o => !W(o)))
+    const vf = (W(q.w) && W(q.w).c && (q.x === "4.9" || q.x === "4.3" || q.x === "4.4" || pt.p === "check")) || (q.x === "4.4" && q.o && q.o.some(o => W(o) && W(o).c)); // 8в: «сверить» пришло новой версией слов, а часть уже собрана — не спрашиваем; 4.4 — у обоих слов пары (круг 3, мелочь 6)
+    if ((listen && listenOff()) || (q.x === "4.9" && micOff()) || !W(q.w) || vf || (q.o && q.x !== "4.3" && q.o.some(o => !W(o)))
       || ((listen || q.x === "4.1" || q.x === "4.2") && clipOf(q.w) && SND_FAILED.has(absUrl(clipOf(q.w))))) { pt.i++; continue; } // звук слова недоступен — пропуск без тишины // снятое слово или «не могу» — пропуск
     Run.q = q; Run.shownAt = Date.now();
     return showQ(q, pt);
@@ -1234,8 +1246,14 @@ function showChoice(q, pt) {
     h("div", { class: "playrow" }, pb, q.x !== "4.4" ? slowBtn(q.w) : null),
     h("div", { class: "opts" + (q.x === "4.4" ? " two" : "") }, btns)];
   const zone = h("div", { class: "zone" }); // место под панель «Верно / Не так»; «не могу слушать» — наверху, не под «Дальше»
-  exScreen(q, pt, q.x, kids, zone, null, h("button", { type: "button", class: "btn link", test: "cant-listen", text: "Не могу слушать", onclick: cantListen }));
+  fitQ(exScreen(q, pt, q.x, kids, zone, null, h("button", { type: "button", class: "btn link", test: "cant-listen", text: "Не могу слушать", onclick: cantListen })));
   Player.play(url, { btn: pb }).then(r => { if (r === "missing") onMissing(pb); });
+}
+// Варианты (с тенью 3 px) — над местом панели «Верно / Не так». Длинный перевод в 4 строки опускал нижний ряд под место — по шагу: варианты мельче (16 px) → без подсказки.
+const FIT_GAP = 3; // зазор под вариантами (их тень 3 px) — один у fitQ и fitPanel (круг 3, мелочь 4: при +3 / +4 заметка снималась зря)
+function fitQ(root) {
+  const o = $(".opts", root), z = $(".zone", root); if (!o || !z) return;
+  for (const c of ["q1", "q2"]) { if (o.getBoundingClientRect().bottom + FIT_GAP <= z.getBoundingClientRect().top) return; root.classList.add(c); }
 }
 function cantListen() {
   ST.set.noListen = Date.now() + 60 * MIN;
@@ -1269,8 +1287,15 @@ function choose(q, i, btns) {
     showTrap || again ? h("p", { class: "trap" }, showTrap ? h("span", { test: right ? null : "trap", text: trap + " " }) : null, again ? h("span", { class: "mut", text: "Вернётся в конце занятия." }) : null) : null,
     h("button", { type: "button", class: "btn main", test: "next", text: right ? "Дальше" : "Понятно", onclick: nextQuestion }));
   const zone = $(".zone"); zone.append(panel);
+  fitPanel(panel, btns);
   $$("[data-test=cant-listen]").forEach(x => { x.hidden = true; });
   if (!right) Player.play(url, { btn: pb });
+}
+// Панель растёт вверх от низа своего места; верх — не выше низа вариантов + 4 px. Не влезла (длинный перевод, другой шрифт) —
+// по шагу: заметка в 1 строку → ответ мельче (не меньше 15 px) → без заметки. Меряем на месте: годится для любого слова и движка.
+function fitPanel(p, btns) {
+  const lim = Math.max.apply(null, btns.map(b => b.getBoundingClientRect().bottom)) + FIT_GAP;
+  for (const c of ["fit1", "fit2", "fit3"]) { if (p.getBoundingClientRect().top >= lim) return; p.classList.add(c); }
 }
 function answer(q, r, sk, now) {
   if (!SESS) return;
@@ -1589,6 +1614,7 @@ function downloadSoon() { // звук урока на парах и следую
     live();
     const el = $("[data-test=pack]"); if (el) { const s = Snd.state(L); if (s.n === s.of) el.remove(); else el.textContent = "Звук урока " + lessonNum(L) + ": скачано " + s.n + " из " + s.of; }
     sayBroken();
+    if (!lessonBroken(L) && $("[data-test=lesson-broken]") && UI.tab === "today" && !UI.inSession) renderToday(); // мелочь 6: урок докачался после повтора — строка уходит
   }, 1200);
 }
 
@@ -1753,7 +1779,7 @@ function showRestore(from) {
   mount(h("section", { class: "scr", "data-screen": "1.8" }, h("div", { class: "body", style: "padding-bottom:120px" },
     h("h1", { text: "Вернуть прогресс" }),
     h("p", { class: "line", text: "Всё, что ты копировал для Claude, можно вернуть на этот телефон." }),
-    h("ol", { class: "steps" }, h("li", { text: "В приложении Claude → Code → окно 🀄 Китайский напиши: «верни прогресс»." }), h("li", { text: "Claude пришлёт код — нажми на него, он скопируется." }), h("li", { text: "Вставь сюда и нажми «Проверить»." })),
+    h("ol", { class: "steps" }, h("li", { text: "В приложении Claude → Code → окно 🀄 Китайский напиши: «верни прогресс»." }), h("li", { text: "Claude пришлёт код — скопируй его целиком кнопкой «Копировать» у кода." }), h("li", { text: "Вставь сюда и нажми «Проверить и вернуть»." })),
     pre, ta, res,
     h("button", { type: "button", class: "btn link", test: "start-fresh", text: from === "settings" ? "‹ Назад" : "Начать с нуля", onclick: () => from === "settings" ? renderSettings() : showFirst() })), kb));
   kbdBar(kb);
@@ -1916,12 +1942,13 @@ async function boot() {
   ST.copy = Object.assign({ t: 0, upto: 0, prev: 0, rows: 0 }, ST.copy);
   ST.launches = (ST.launches || 0) + 1;
   try { localStorage.removeItem("zh2-updated"); } catch (e) {}
-  if (ST.ver && ST.ver !== VERSION) UI.updated = VERSION; // первое открытие после обновления — плашка 1.9 на 3 с
+  const verNew = !!(ST.ver && ST.ver !== VERSION); // первое открытие после обновления — плашка 1.9 на 3 с
   const prevVer = ST.ver; ST.ver = VERSION;
   const lids = LESSONS.map(l => l.id), added = Array.isArray(ST.seenL) ? lids.filter(x => !ST.seenL.includes(x)) : [];
   ST.seenL = lids;
+  // плашка 1.9 ждёт в памяти телефона вместе с версией (круг 3, №1): переживёт выгрузку и перезапуск, покажется один раз — вне занятия (renderToday)
+  if (verNew || added.length) ST.upd = { v: VERSION, add: [...new Set(((ST.upd && ST.upd.add) || []).concat(added))] };
   if (added.length) { // «Обновлено: урок 16 добавлен»; занимался «не из 1上 / дальше 15» (2.7) — новый урок становится уроком на парах
-    UI.added = added; if (!UI.updated) UI.updated = VERSION;
     if (ST.lesson && ST.lesson.other) { ST.lesson = { id: added[0] }; UI.autoLesson = added[0]; }
   }
   applyTheme();
@@ -1937,7 +1964,7 @@ async function boot() {
   const per = navigator.storage && navigator.storage.persisted ? await navigator.storage.persisted().catch(() => null) : null;
   const ev = { k: "L", t: Date.now(), sk: Math.round(BOOT.t0 - (performance.timeOrigin || BOOT.t0)), ok: Math.round(performance.now()),
     net: navigator.onLine === false ? 0 : 1, home: document.documentElement.getAttribute("data-standalone") === "true" ? 1 : 0, v: VERSION, sw: hadCtrl ? 1 : 0, per: per ? 1 : 0 };
-  if (UI.updated) ev.upd = prevVer;
+  if (verNew) ev.upd = prevVer;
   try { const sf = localStorage.getItem("zh2-savefail"); if (sf) { localStorage.removeItem("zh2-savefail"); const x = JSON.parse(sf); commit([{ k: "E", t: Date.now(), m: "запись в память не прошла: " + x.why, at: x.t }]); } } catch (e) {}
   try { const bf = localStorage.getItem("zh2-bootfail"); if (bf) { localStorage.removeItem("zh2-bootfail"); const x = JSON.parse(bf); commit([{ k: "E", t: Date.now(), m: "прошлый запуск не загрузился: " + x.r + " (" + (x.log || []).join(",") + ")", at: x.t }]); } } catch (e) {}
   if (BOOT.log && BOOT.log.length) commit([{ k: "E", t: Date.now(), m: "загрузка с повторами: " + BOOT.log.slice(-5).join(",") }]);
@@ -1950,11 +1977,12 @@ async function boot() {
     navigator.serviceWorker.addEventListener("message", e => { if (e.data && e.data.type === "sw-updated" && e.data.v !== VERSION && hadCtrl) onUpdate(); });
     setTimeout(() => { if (navigator.onLine !== false) navigator.serviceWorker.getRegistration().then(r => r && r.update()).catch(() => {}); }, 4000);
   }
-  window.addEventListener("online", () => { document.documentElement.setAttribute("data-net", "online"); if (UI.tab === "today" && !UI.inSession && $("[data-screen^='2.']")) renderToday(); downloadSoon(); });
+  const sndAgain = () => { if (sndRetryOld(C ? packNow().lids : [])) { UI.brokenSaid = null; downloadSoon(); } }; // мелочь 6: битые клипы старше 10 мин — заново; строка lesson-broken уйдёт, когда урок докачается (downloadSoon)
+  window.addEventListener("online", () => { document.documentElement.setAttribute("data-net", "online"); if (UI.tab === "today" && !UI.inSession && $("[data-screen^='2.']")) renderToday(); sndAgain(); downloadSoon(); });
   window.addEventListener("offline", () => { document.documentElement.setAttribute("data-net", "offline"); if (UI.tab === "today" && !UI.inSession && $("[data-screen^='2.']")) renderToday(); });
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) { tick(true); Player.stop(); if (Mic.stopNow) Mic.stopNow(); saveNow(); if (UI.reloadPending && !UI.inSession) reloadNow(); }
-    else Run.lastTick = Date.now();
+    else { Run.lastTick = Date.now(); if (navigator.onLine !== false) sndAgain(); }
   });
   window.addEventListener("pagehide", saveNow);
   try { matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if ((ST.set.theme || "auto") === "auto") applyTheme(); }); } catch (e) {}
